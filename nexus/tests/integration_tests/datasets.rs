@@ -5,9 +5,8 @@
 use http::method::Method;
 use http::StatusCode;
 use omicron_common::api::external::ByteCount;
-use omicron_nexus::internal_api::params::{
-    DatasetKind, DatasetPutRequest, ZpoolPutRequest,
-};
+use omicron_common::api::internal::nexus::DatasetKind;
+use omicron_nexus::internal_api::params::{DatasetPutRequest, ZpoolPutRequest};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use uuid::Uuid;
 

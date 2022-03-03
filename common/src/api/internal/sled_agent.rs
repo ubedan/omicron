@@ -108,3 +108,64 @@ pub struct InstanceRuntimeStateRequested {
     pub run_state: InstanceStateRequested,
     pub migration_params: Option<InstanceRuntimeStateMigrateParams>,
 }
+
+/// The type of a dataset, and an axuiliary information necessary
+/// to successfully launch a zone managing the associated data.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DatasetKind {
+    CockroachDb {
+        /// The addresses of all nodes within the cluster.
+        all_addresses: Vec<SocketAddr>,
+    },
+    Crucible,
+    Clickhouse,
+}
+
+impl From<DatasetKind> for internal::nexus::DatasetKind {
+    fn from(d: DatasetKind) -> Self {
+        use DatasetKind::*;
+        match d {
+            CockroachDb { .. } => internal::nexus::DatasetKind::Cockroach,
+            Crucible { .. } => internal::nexus::DatasetKind::Crucible,
+            Clickhouse { .. } => internal::nexus::DatasetKind::Clickhouse,
+        }
+    }
+}
+
+/// Used to request a new partition kind exists within a zpool.
+///
+/// Many partition types are associated with services that will be
+/// instantiated when the partition is detected.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct DatasetEnsureBody {
+    // The name (and UUID) of the Zpool which we are inserting into.
+    pub zpool_uuid: Uuid,
+    // The type of the filesystem.
+    pub partition_kind: DatasetKind,
+    // The address on which the zone will listen for requests.
+    pub address: SocketAddr,
+    // TODO: We could insert a UUID here, if we want that to be set by the
+    // caller explicitly? Currently, the lack of a UUID implies that
+    // "at most one partition type" exists within a zpool.
+}
+
+#[derive(
+    Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash,
+)]
+pub struct ServiceRequest {
+    // The name of the service to be created.
+    pub name: String,
+    // The addresses on which the service should listen for requests.
+    pub addresses: Vec<SocketAddr>,
+}
+
+/// Used to request that the Sled initialize certain services on initialization.
+///
+/// This may be used to record that certain sleds are responsible for
+/// launching services which may not be associated with a partition, such
+/// as Nexus.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct ServiceEnsureBody {
+    pub services: Vec<ServiceRequest>,
+}
