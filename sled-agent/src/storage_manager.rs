@@ -358,7 +358,7 @@ impl DatasetInfo {
                     "-s",
                     "svc:oxide/crucible/agent",
                     "setprop",
-                    &format!("config/listen={}", address.to_string()),
+                    &format!("config/listen={}", address),
                 ])?;
 
                 zone.run_cmd(&[
