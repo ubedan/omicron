@@ -62,7 +62,11 @@ pub async fn download_artifact(
             tokio::fs::write(&tmp_path, contents).await?;
 
             // Write the file to its final path.
-            tokio::fs::rename(&tmp_path, directory.join(artifact.name)).await?;
+            tokio::fs::rename(
+                &tmp_path,
+                directory.join(format!("{}.tar.gz", artifact.name)),
+            )
+            .await?;
             Ok(())
         }
     }
@@ -88,7 +92,8 @@ mod test {
             version: 3,
             kind: UpdateArtifactKind::Zone,
         };
-        let expected_path = PathBuf::from(ZONE_PATH).join(expected_name);
+        let expected_path =
+            PathBuf::from(ZONE_PATH).join(format!("{}.tar.gz", expected_name));
 
         // Remove the file if it already exists.
         let _ = tokio::fs::remove_file(&expected_path).await;

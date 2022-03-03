@@ -89,7 +89,7 @@ async fn test_update_end_to_end() {
 
     // check sled agent did the thing
     assert_eq!(
-        std::fs::read("/opt/oxide/cockroachdb").unwrap(),
+        std::fs::read("/opt/oxide/cockroachdb.tar.gz").unwrap(),
         TARGET_CONTENTS
     );
 }
