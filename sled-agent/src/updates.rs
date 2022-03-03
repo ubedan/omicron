@@ -10,6 +10,8 @@ use omicron_common::api::internal::nexus::{
 };
 use std::path::PathBuf;
 
+static ZONE_PATH: &str = "/opt/oxide";
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("I/O Error: {0}")]
@@ -28,7 +30,7 @@ pub async fn download_artifact(
 ) -> Result<(), Error> {
     match artifact.kind {
         UpdateArtifactKind::Zone => {
-            let directory = PathBuf::from("/var/tmp/zones");
+            let directory = PathBuf::from(ZONE_PATH);
             tokio::fs::create_dir_all(&directory).await?;
 
             // We download the file to a location named "<artifact-name>-<version>".
@@ -86,7 +88,7 @@ mod test {
             version: 3,
             kind: UpdateArtifactKind::Zone,
         };
-        let expected_path = PathBuf::from("/var/tmp/zones").join(expected_name);
+        let expected_path = PathBuf::from(ZONE_PATH).join(expected_name);
 
         // Remove the file if it already exists.
         let _ = tokio::fs::remove_file(&expected_path).await;
