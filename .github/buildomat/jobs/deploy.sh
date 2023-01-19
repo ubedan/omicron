@@ -7,6 +7,7 @@
 #:	"%/var/svc/log/system-illumos-sled-agent:default.log",
 #:	"%/zone/oxz_nexus/root/var/svc/log/system-illumos-nexus:default.log",
 #:	"%/zone/oxz_propolis-server_*/root/var/svc/log/system-illumos-propolis-server:*.log",
+#:	"%/zone/oxz_crucible_*/root/var/svc/log/oxide-crucible-downstairs:downstairs-*.log",
 #: ]
 #: skip_clone = true
 #:
