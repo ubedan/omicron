@@ -249,7 +249,7 @@ async fn instance_launch() -> Result<()> {
                 .map_err(|_| CondCheckError::<oxide_client::Error>::NotYet)
         },
         &Duration::from_secs(1),
-        &Duration::from_secs(60),
+        &Duration::from_secs(15),
     )
     .await?;
 

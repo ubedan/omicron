@@ -6,6 +6,7 @@
 #: output_rules = [
 #:	"%/var/svc/log/system-illumos-sled-agent:default.log",
 #:	"%/zone/oxz_nexus/root/var/svc/log/system-illumos-nexus:default.log",
+#:	"%/zone/oxz_propolis-server_*/root/var/svc/log/system-illumos-propolis-server:*.log",
 #: ]
 #: skip_clone = true
 #:
@@ -31,27 +32,27 @@ _exit_trap() {
 	set -o xtrace
 	banner evidence
 	zoneadm list -civ
-	pfexec dladm show-phys -m
-	pfexec dladm show-link
-	pfexec dladm show-vnic
-	pfexec ipadm
-	pfexec netstat -rncva
-	pfexec netstat -anu
-	pfexec arp -an
-	pfexec zfs list
-	pfexec zpool list
-	pfexec fmdump -eVp
-	pfexec ptree -z global
-	pfexec svcs -xv
-	for z in $(zoneadm list -n); do
-		banner "${z/oxz_/}"
-		pfexec svcs -xv -z "$z"
-		pfexec ptree -z "$z"
-		pfexec zlogin "$z" ipadm
-		pfexec zlogin "$z" netstat -rncva
-		pfexec zlogin "$z" netstat -anu
-		pfexec zlogin "$z" arp -an
-	done
+	# pfexec dladm show-phys -m
+	# pfexec dladm show-link
+	# pfexec dladm show-vnic
+	# pfexec ipadm
+	# pfexec netstat -rncva
+	# pfexec netstat -anu
+	# pfexec arp -an
+	# pfexec zfs list
+	# pfexec zpool list
+	# pfexec fmdump -eVp
+	# pfexec ptree -z global
+	# pfexec svcs -xv
+	# for z in $(zoneadm list -n); do
+	# 	banner "${z/oxz_/}"
+	# 	pfexec svcs -xv -z "$z"
+	# 	pfexec ptree -z "$z"
+	# 	pfexec zlogin "$z" ipadm
+	# 	pfexec zlogin "$z" netstat -rncva
+	# 	pfexec zlogin "$z" netstat -anu
+	# 	pfexec zlogin "$z" arp -an
+	# done
 
 	exit $status
 }
