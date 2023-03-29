@@ -14,6 +14,11 @@ set -o errexit
 set -o pipefail
 set -o xtrace
 
+#
+# XXX temporary sync=disabled timing test
+#
+pfexec zfs set sync=disabled rpool
+
 cargo --version
 rustc --version
 
