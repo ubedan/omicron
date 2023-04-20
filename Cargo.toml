@@ -257,7 +257,7 @@ reqwest = { version = "0.11", default-features = false }
 ring = "0.16"
 rustfmt-wrapper = "0.2"
 rustls = "0.21.0"
-samael = { git = "https://github.com/njaremko/samael", features = ["xmlsec"], branch = "master" }
+samael = { git = "https://github.com/njaremko/samael", features = ["xmlsec"], branch = "update-deps" }
 schemars = "0.8.12"
 semver = { version = "1.0.17", features = ["std", "serde"] }
 serde = { version = "1.0", default-features = false, features = [ "derive" ] }
