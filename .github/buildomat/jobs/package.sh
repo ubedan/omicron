@@ -5,6 +5,7 @@
 #: target = "helios-2.0"
 #: rust_toolchain = "1.70.0"
 #: output_rules = [
+#:	"%/tmp/debug_opens.txt",
 #:	"=/work/version.txt",
 #:	"=/work/package.tar.gz",
 #:	"=/work/global-zone-packages.tar.gz",
@@ -42,6 +43,8 @@ echo "$VERSION" >/work/version.txt
 
 ptime -m ./tools/install_builder_prerequisites.sh -yp
 ptime -m ./tools/ci_download_softnpu_machinery
+
+pfexec ./opens.d >/tmp/debug_opens.txt 2>&1 </dev/null &
 
 # Build the test target
 ptime -m cargo run --locked --release --bin omicron-package -- \
