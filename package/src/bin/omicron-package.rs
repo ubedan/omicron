@@ -905,8 +905,13 @@ async fn main() -> Result<()> {
         SubCommand::Build(BuildCommand::Dot) => {
             do_dot(&get_config()?).await?;
         }
-        SubCommand::Build(BuildCommand::Package) => {
-            do_package(&get_config()?, &args.artifact_dir).await?;
+        SubCommand::Build(BuildCommand::Package { only }) => {
+            let mut config = get_config()?;
+            config
+                .package_config
+                .packages
+                .retain(|name, _| only.contains(name));
+            do_package(&config, &args.artifact_dir).await?;
         }
         SubCommand::Build(BuildCommand::Stamp { package_name, version }) => {
             do_stamp(&get_config()?, &args.artifact_dir, package_name, version)

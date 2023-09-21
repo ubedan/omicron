@@ -24,8 +24,8 @@
 #:	"oxidecomputer/nanobl-rs",
 #: ]
 #:
-#: [dependencies.package]
-#: job = "helios / package"
+#: [dependencies.global-zone-packages]
+#: job = "helios / global zone packages"
 #:
 #: [[publish]]
 #: series = "image"
@@ -51,4 +51,4 @@ cd /work/helios
 cd "$TOP"
 ./tools/build-host-image.sh -R \
     /work/helios \
-    /input/package/work/trampoline-global-zone-packages.tar.gz
+    /input/global-zone-packages/work/trampoline-global-zone-packages.tar.gz

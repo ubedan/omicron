@@ -70,7 +70,11 @@ pub enum BuildCommand {
     Dot,
     /// Builds the packages specified in a manifest, and places them into an
     /// 'out' directory.
-    Package,
+    Package {
+        /// Build only these named packages.
+        #[arg(long)]
+        only: Vec<String>,
+    },
     /// Stamps semver versions onto packages within a manifest
     Stamp {
         /// The name of the artifact to be stamped.

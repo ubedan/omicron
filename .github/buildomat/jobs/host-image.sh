@@ -24,8 +24,8 @@
 #:	"oxidecomputer/nanobl-rs",
 #: ]
 #:
-#: [dependencies.package]
-#: job = "helios / package"
+#: [dependencies.global-zone-packages]
+#: job = "helios / global zone packages"
 #:
 #: [[publish]]
 #: series = "image"
@@ -52,6 +52,6 @@ cd /work/helios
 
 cd "$TOP"
 ./tools/build-host-image.sh -B \
-    -S /input/package/work/zones/switch-asic.tar.gz \
+    -S /input/global-zone-packages/work/switch-asic.tar.gz \
     /work/helios \
-    /input/package/work/global-zone-packages.tar.gz
+    /input/global-zone-packages/work/global-zone-packages.tar.gz

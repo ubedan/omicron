@@ -18,6 +18,9 @@
 #: [dependencies.package]
 #: job = "helios / package"
 #:
+#: [dependencies.global-zone-packages]
+#: job = "helios / global zone packages"
+#:
 #: [dependencies.host]
 #: job = "helios / build OS image"
 #:
@@ -62,7 +65,7 @@ set -o xtrace
 ALL_BOARDS=(gimlet-{c..e} psc-{b..c} sidecar-{b..c})
 
 TOP=$PWD
-VERSION=$(< /input/package/work/version.txt)
+VERSION=$(< /input/global-zone-packages/work/version.txt)
 
 for bin in caboose-util tufaceous; do
     ptime -m gunzip < /input/ci-tools/work/$bin.gz > /work/$bin
