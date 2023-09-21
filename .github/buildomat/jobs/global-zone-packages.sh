@@ -66,18 +66,7 @@ ptime -m cargo run --locked --release --bin omicron-package -- \
   --only omicron-sled-agent \
   --only overlay \
   --only logadm \
-  --only propolis-server
-stamp_packages \
-  maghemite \
-  omicron-sled-agent \
-  overlay \
-  propolis-server
-
-# Create global zone package @ /work/global-zone-packages.tar.gz
-ptime -m ./tools/build-global-zone-packages.sh "$tarball_src_dir" /work
-
-ptime -m cargo run --locked --release --bin omicron-package -- \
-  -t host package \
+  --only propolis-server \
   --only dendrite-asic \
   --only mg-ddm \
   --only omicron-gateway \
@@ -88,7 +77,15 @@ ptime -m cargo run --locked --release --bin omicron-package -- \
   --only wicket \
   --only wicketd \
   --only xcvradm
-stamp_packages switch-asic
+stamp_packages \
+  maghemite \
+  omicron-sled-agent \
+  overlay \
+  propolis-server \
+  switch-asic
+
+# Create global zone package @ /work/global-zone-packages.tar.gz
+ptime -m ./tools/build-global-zone-packages.sh "$tarball_src_dir" /work
 cp out/switch-asic.tar.gz /work/
 
 #
