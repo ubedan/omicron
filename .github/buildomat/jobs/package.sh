@@ -29,7 +29,6 @@ ptime -m cargo run --locked --release --bin omicron-package -- \
 # phases of buildomat.
 
 files=(
-	out/*.tar
 	out/target/test
 	out/npuzone/*
 	package-manifest.toml

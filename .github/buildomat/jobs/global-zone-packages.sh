@@ -65,13 +65,31 @@ ptime -m cargo run --locked --release --bin omicron-package -- \
   --only maghemite \
   --only omicron-sled-agent \
   --only overlay \
-  --only propolis-server \
-  --only switch-asic
-stamp_packages omicron-sled-agent maghemite propolis-server overlay
-cp out/switch-asic.tar.gz /work/
+  --only logadm \
+  --only propolis-server
+stamp_packages \
+  maghemite \
+  omicron-sled-agent \
+  overlay \
+  propolis-server
 
 # Create global zone package @ /work/global-zone-packages.tar.gz
 ptime -m ./tools/build-global-zone-packages.sh "$tarball_src_dir" /work
+
+ptime -m cargo run --locked --release --bin omicron-package -- \
+  -t host package \
+  --only dendrite-asic \
+  --only mg-ddm \
+  --only omicron-gateway \
+  --only omicron-gateway-asic \
+  --only omicron-gateway-asic-customizations \
+  --only switch_zone_setup \
+  --only switch-asic \
+  --only wicket \
+  --only wicketd \
+  --only xcvradm
+stamp_packages switch-asic
+cp out/switch-asic.tar.gz /work/
 
 #
 # Global Zone files for Trampoline image
@@ -84,7 +102,9 @@ ptime -m cargo run --locked --release --bin omicron-package -- \
   -t recovery package \
   --only installinator \
   --only maghemite
-stamp_packages installinator maghemite
+stamp_packages \
+  installinator \
+  maghemite
 
 # Create trampoline global zone package @ /work/trampoline-global-zone-packages.tar.gz
 ptime -m ./tools/build-trampoline-global-zone-packages.sh "$tarball_src_dir" /work

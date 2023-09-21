@@ -450,9 +450,9 @@ async fn do_package(config: &Config, output_directory: &Path) -> Result<()> {
         );
 
         let packages = batch.into_iter().map(|output| {
-            all_packages
-                .remove(&output)
-                .expect("package should've already been handled.")
+            all_packages.remove(&output).unwrap_or_else(|| {
+                panic!("package {} should've already been handled.", output)
+            })
         });
 
         let ui_refs = vec![ui.clone(); packages.len()];
