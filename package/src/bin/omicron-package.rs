@@ -907,10 +907,12 @@ async fn main() -> Result<()> {
         }
         SubCommand::Build(BuildCommand::Package { only }) => {
             let mut config = get_config()?;
-            config
-                .package_config
-                .packages
-                .retain(|name, _| only.contains(name));
+            if !only.is_empty() {
+                config
+                    .package_config
+                    .packages
+                    .retain(|name, _| only.contains(name));
+            }
             do_package(&config, &args.artifact_dir).await?;
         }
         SubCommand::Build(BuildCommand::Stamp { package_name, version }) => {
