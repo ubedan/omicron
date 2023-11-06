@@ -93,4 +93,6 @@ jobs:
     - name: Install Pre-Requisites
       run: ./tools/install_builder_prerequisites.sh -y
     - name: Test build documentation
-      run: RUSTDOCFLAGS="-Dwarnings" cargo doc
+      run: |
+        trap "df -h" EXIT
+        RUSTDOCFLAGS="-Dwarnings" cargo doc
