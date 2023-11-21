@@ -1,6 +1,7 @@
 #!/bin/bash
 #:
 #: name = "helios / package"
+#: enable = false
 #: variety = "basic"
 #: target = "helios-2.0-20231118"
 #: rust_toolchain = "1.72.1"
@@ -15,11 +16,13 @@
 #: [[publish]]
 #: series = "image"
 #: name = "global-zone-packages"
+#: enable = false
 #: from_output = "/work/global-zone-packages.tar.gz"
 #:
 #: [[publish]]
 #: series = "image"
 #: name = "trampoline-global-zone-packages"
+#: enable = false
 #: from_output = "/work/trampoline-global-zone-packages.tar.gz"
 
 set -o errexit

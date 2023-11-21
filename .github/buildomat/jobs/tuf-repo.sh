@@ -1,6 +1,7 @@
 #!/bin/bash
 #:
 #: name = "helios / build TUF repo"
+#: enable = false
 #: variety = "basic"
 #: target = "helios-2.0-20231118"
 #: output_rules = [
@@ -24,46 +25,55 @@
 #: [[publish]]
 #: series = "rot-all"
 #: name = "repo.zip.parta"
+#: enable = false
 #: from_output = "/work/repo-rot-all.zip.parta"
 #:
 #: [[publish]]
 #: series = "rot-all"
 #: name = "repo.zip.partb"
+#: enable = false
 #: from_output = "/work/repo-rot-all.zip.partb"
 #:
 #: [[publish]]
 #: series = "rot-all"
 #: name = "repo.zip.sha256.txt"
+#: enable = false
 #: from_output = "/work/repo-rot-all.zip.sha256.txt"
 #:
 #: [[publish]]
 #: series = "rot-prod-rel"
 #: name = "repo.zip.parta"
+#: enable = false
 #: from_output = "/work/repo-rot-prod-rel.zip.parta"
 #:
 #: [[publish]]
 #: series = "rot-prod-rel"
 #: name = "repo.zip.partb"
+#: enable = false
 #: from_output = "/work/repo-rot-prod-rel.zip.partb"
 #:
 #: [[publish]]
 #: series = "rot-prod-rel"
 #: name = "repo.zip.sha256.txt"
+#: enable = false
 #: from_output = "/work/repo-rot-prod-rel.zip.sha256.txt"
 #:
 #: [[publish]]
 #: series = "rot-staging-dev"
 #: name = "repo.zip.parta"
+#: enable = false
 #: from_output = "/work/repo-rot-staging-dev.zip.parta"
 #:
 #: [[publish]]
 #: series = "rot-staging-dev"
 #: name = "repo.zip.partb"
+#: enable = false
 #: from_output = "/work/repo-rot-staging-dev.zip.partb"
 #:
 #: [[publish]]
 #: series = "rot-staging-dev"
 #: name = "repo.zip.sha256.txt"
+#: enable = false
 #: from_output = "/work/repo-rot-staging-dev.zip.sha256.txt"
 #:
 
