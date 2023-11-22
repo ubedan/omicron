@@ -2321,9 +2321,14 @@ mod illumos_tests {
 
     // Quota applied to test datasets.
     //
-    // This needs to be at least this big lest we get "out of space" errors when
-    // creating. Not sure where those come from, but could be ZFS overhead.
-    const TEST_QUOTA: u64 = 1024 * 32;
+    // ZFS will not allow a quota to be set that is smaller than the bytes
+    // presently stored for that dataset, either at dataset creation time or
+    // later by setting the "quota" property.  The exact minimum number of bytes
+    // depends on many factors, including the block size of the underlying pool;
+    // i.e., the "ashift" value.  An empty dataset is unlikely to contain more
+    // than one megabyte of overhead, so use that as a conservative test size to
+    // avoid issues.
+    const TEST_QUOTA: u64 = 1024 * 1024;
 
     async fn create_test_dataset(
         id: &Uuid,
