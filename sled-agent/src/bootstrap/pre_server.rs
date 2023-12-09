@@ -172,7 +172,12 @@ fn build_logger(config: &Config) -> Result<Logger, StartError> {
             Ok(log)
         }
         slog_dtrace::ProbeRegistration::Failed(err) => {
-            Err(StartError::RegisterDTraceProbes(err))
+            // NOTE: Convert the error to `anyhow::Error` to avoid any coupling
+            // to the specific version of `usdt::Error` that `slog_dtrace`
+            // reexports.
+            //
+            // See https://github.com/oxidecomputer/slog-dtrace/issues/7.
+            Err(StartError::RegisterDTraceProbes(anyhow::anyhow!(err)))
         }
     }
 }

@@ -109,7 +109,8 @@ tracing = { version = "0.1.37", features = ["log"] }
 trust-dns-proto = { version = "0.22.0" }
 unicode-bidi = { version = "0.3.13" }
 unicode-normalization = { version = "0.1.22" }
-usdt = { version = "0.3.5" }
+usdt = { git = "https://github.com/oxidecomputer/usdt", branch = "cargo-release" }
+usdt-impl = { git = "https://github.com/oxidecomputer/usdt", branch = "cargo-release", default-features = false, features = ["asm", "des"] }
 uuid = { version = "1.6.1", features = ["serde", "v4"] }
 yasna = { version = "0.5.2", features = ["bit-vec", "num-bigint", "std", "time"] }
 zerocopy = { version = "0.7.26", features = ["derive", "simd"] }
@@ -213,7 +214,8 @@ tracing = { version = "0.1.37", features = ["log"] }
 trust-dns-proto = { version = "0.22.0" }
 unicode-bidi = { version = "0.3.13" }
 unicode-normalization = { version = "0.1.22" }
-usdt = { version = "0.3.5" }
+usdt = { git = "https://github.com/oxidecomputer/usdt", branch = "cargo-release" }
+usdt-impl = { git = "https://github.com/oxidecomputer/usdt", branch = "cargo-release", default-features = false, features = ["asm", "des"] }
 uuid = { version = "1.6.1", features = ["serde", "v4"] }
 yasna = { version = "0.5.2", features = ["bit-vec", "num-bigint", "std", "time"] }
 zerocopy = { version = "0.7.26", features = ["derive", "simd"] }
@@ -222,6 +224,7 @@ zip = { version = "0.6.6", default-features = false, features = ["bzip2", "defla
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2.4.0", default-features = false, features = ["std"] }
+dof = { git = "https://github.com/oxidecomputer/usdt", branch = "cargo-release", default-features = false, features = ["des"] }
 hyper-rustls = { version = "0.24.2" }
 mio = { version = "0.8.9", features = ["net", "os-ext"] }
 once_cell = { version = "1.19.0", features = ["unstable"] }
@@ -229,6 +232,7 @@ rustix = { version = "0.38.25", features = ["fs", "termios"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2.4.0", default-features = false, features = ["std"] }
+dof = { git = "https://github.com/oxidecomputer/usdt", branch = "cargo-release", default-features = false, features = ["des"] }
 hyper-rustls = { version = "0.24.2" }
 mio = { version = "0.8.9", features = ["net", "os-ext"] }
 once_cell = { version = "1.19.0", features = ["unstable"] }
@@ -268,6 +272,7 @@ rustix = { version = "0.38.25", features = ["fs", "termios"] }
 
 [target.x86_64-unknown-illumos.dependencies]
 bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2.4.0", default-features = false, features = ["std"] }
+dof = { git = "https://github.com/oxidecomputer/usdt", branch = "cargo-release", default-features = false, features = ["des"] }
 errno = { version = "0.3.2", default-features = false, features = ["std"] }
 hyper-rustls = { version = "0.24.2" }
 mio = { version = "0.8.9", features = ["net", "os-ext"] }
@@ -278,6 +283,7 @@ toml_edit-cdcf2f9584511fe6 = { package = "toml_edit", version = "0.19.15", featu
 
 [target.x86_64-unknown-illumos.build-dependencies]
 bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2.4.0", default-features = false, features = ["std"] }
+dof = { git = "https://github.com/oxidecomputer/usdt", branch = "cargo-release", default-features = false, features = ["des"] }
 errno = { version = "0.3.2", default-features = false, features = ["std"] }
 hyper-rustls = { version = "0.24.2" }
 mio = { version = "0.8.9", features = ["net", "os-ext"] }

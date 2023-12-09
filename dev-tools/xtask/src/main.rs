@@ -27,6 +27,8 @@ enum Cmds {
     CheckWorkspaceDeps,
     /// Run configured clippy checks
     Clippy,
+    /// Emit DTrace probes that exist in any Omicron binaries.
+    DtraceProbes,
 }
 
 fn main() -> Result<()> {
@@ -34,8 +36,10 @@ fn main() -> Result<()> {
     match args.cmd {
         Cmds::Clippy => cmd_clippy(),
         Cmds::CheckWorkspaceDeps => cmd_check_workspace_deps(),
+        Cmds::DtraceProbes => cmd_dtrace_probes(),
     }
 }
+
 
 fn cmd_clippy() -> Result<()> {
     let cargo =
@@ -183,6 +187,70 @@ fn cmd_check_workspace_deps() -> Result<()> {
         bail!("errors with workspace dependencies");
     }
 
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DTraceProbe {
+    name: String,
+    arguments: Vec<String>,
+}
+
+fn cmd_dtrace_probes() -> Result<()> {
+    const SKIP_ME: &[&str] = &[
+        "bootstrap",
+        "xtask",
+    ];
+    const PATHS: &[&str] = &["release", "debug"];
+    let workspace = load_workspace()?;
+
+    // Find all local packages, and any binaries they contain, and attempt to
+    // find contained DTrace probes in the object files.
+    let mut probes_by_binary = BTreeMap::new();
+    for bin_target in workspace
+        .workspace_packages()
+        .iter()
+        .flat_map(|package| {
+            package
+                .targets
+                .iter()
+                .filter(|target| target.is_bin() && !SKIP_ME.contains(&target.name.as_str()))
+        })
+    {
+        let maybe_path = PATHS.iter().filter_map(|p| {
+            let path = workspace.target_directory.join(p).join(&bin_target.name);
+            if path.exists() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .next();
+        let Some(path) = maybe_path else {
+            continue;
+        };
+        match usdt::probe_records(&path) {
+            Ok(section) => {
+                if section.providers.is_empty() {
+                    continue;
+                }
+                let providers: &mut BTreeMap<_, _> = probes_by_binary.entry(bin_target.name.clone()).or_default();
+                for provider in section.providers.values() {
+                    let probes: &mut Vec<_> = providers.entry(provider.name.clone()).or_default();
+                    probes.extend(
+                        provider.probes.values().map(|probe| {
+                            DTraceProbe {
+                                name: probe.name.clone(),
+                                arguments: probe.arguments.clone()
+                            }
+                        })
+                    )
+                }
+            }
+            Err(e) => eprintln!("Failed to extract DTrace probes from '{path}': {e}'"),
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&probes_by_binary).unwrap());
     Ok(())
 }
 

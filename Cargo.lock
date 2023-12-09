@@ -1722,7 +1722,7 @@ source = "git+https://github.com/oxidecomputer/diesel-dtrace?branch=main#c1252df
 dependencies = [
  "diesel",
  "serde",
- "usdt",
+ "usdt 0.3.5",
  "uuid",
  "version_check",
 ]
@@ -1902,6 +1902,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dof"
+version = "0.3.0"
+source = "git+https://github.com/oxidecomputer/usdt?branch=cargo-release#6b419ebfb2bbbbe728707241d5c6c1e51822a776"
+dependencies = [
+ "goblin",
+ "pretty-hex 0.3.0",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "zerocopy 0.6.4",
+]
+
+[[package]]
 name = "downcast"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1973,7 +1986,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml 0.8.8",
- "usdt",
+ "usdt 0.3.5",
  "uuid",
  "version_check",
  "waitgroup",
@@ -1996,6 +2009,16 @@ name = "dtrace-parser"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bed110893a7f9f4ceb072e166354a09f6cb4cc416eec5b5e5e8ee367442d434b"
+dependencies = [
+ "pest",
+ "pest_derive",
+ "thiserror",
+]
+
+[[package]]
+name = "dtrace-parser"
+version = "0.2.0"
+source = "git+https://github.com/oxidecomputer/usdt?branch=cargo-release#6b419ebfb2bbbbe728707241d5c6c1e51822a776"
 dependencies = [
  "pest",
  "pest_derive",
@@ -2601,7 +2624,7 @@ dependencies = [
  "thiserror",
  "tlvc 0.3.1 (git+https://github.com/oxidecomputer/tlvc.git?branch=main)",
  "tokio",
- "usdt",
+ "usdt 0.3.5",
  "uuid",
  "version_check",
  "zip",
@@ -2700,6 +2723,17 @@ dependencies = [
  "fnv",
  "log",
  "regex",
+]
+
+[[package]]
+name = "goblin"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d6b4de4a8eb6c46a8c77e1d3be942cb9a8bf073c22374578e5ba4b08ed0ff68"
+dependencies = [
+ "log",
+ "plain",
+ "scroll",
 ]
 
 [[package]]
@@ -3895,6 +3929,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f232d6ef707e1956a43342693d2a31e72989554d58299d7a88738cc95b0d35c"
 
 [[package]]
+name = "memmap"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6585fd95e7bb50d6cc31e20d4cf9afb4e2ba16c5846fc76793f11218da9c475b"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "memoffset"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4204,7 +4248,7 @@ dependencies = [
  "term",
  "thiserror",
  "tokio",
- "usdt",
+ "usdt 0.5.0",
  "uuid",
 ]
 
@@ -5029,7 +5073,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "toml 0.8.8",
- "usdt",
+ "usdt 0.5.0",
  "uuid",
  "zeroize",
  "zone",
@@ -5065,7 +5109,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-postgres",
- "usdt",
+ "usdt 0.5.0",
 ]
 
 [[package]]
@@ -5095,6 +5139,7 @@ dependencies = [
  "der",
  "diesel",
  "digest",
+ "dof 0.3.0",
  "either",
  "elliptic-curve",
  "errno",
@@ -5175,7 +5220,8 @@ dependencies = [
  "trust-dns-proto",
  "unicode-bidi",
  "unicode-normalization",
- "usdt",
+ "usdt 0.5.0",
+ "usdt-impl 0.5.0",
  "uuid",
  "yasna",
  "zerocopy 0.7.26",
@@ -5524,7 +5570,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "usdt",
+ "usdt 0.5.0",
  "uuid",
 ]
 
@@ -5949,6 +5995,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26072860ba924cbfa98ea39c8c19b4dd6a4a25423dbdf219c1eca91aa0cf6964"
 
 [[package]]
+name = "plain"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+
+[[package]]
 name = "platforms"
 version = "3.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6127,6 +6179,12 @@ name = "pretty-hex"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc5c99d529f0d30937f6f4b8a86d988047327bb88d04d2c4afc356de74722131"
+
+[[package]]
+name = "pretty-hex"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6fa0831dd7cc608c38a5e323422a0077678fa5744aa2be4ad91c4ece8eec8d5"
 
 [[package]]
 name = "pretty-hex"
@@ -7275,6 +7333,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "scroll"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04c565b551bafbef4157586fa379538366e4385d42082f255bfd96e4fe8519da"
+dependencies = [
+ "scroll_derive",
+]
+
+[[package]]
+name = "scroll_derive"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1db149f81d46d2deba7cd3c50772474707729550221e69588478ebf9ada425ae"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.32",
+]
+
+[[package]]
 name = "sct"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7823,7 +7901,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slog",
- "usdt",
+ "usdt 0.3.5",
  "version_check",
 ]
 
@@ -9372,11 +9450,26 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b4c48f9e522b977bbe938a0d7c4d36633d267ba0155aaa253fb57d0531be0fb"
 dependencies = [
- "dtrace-parser",
+ "dtrace-parser 0.1.14",
  "serde",
- "usdt-attr-macro",
- "usdt-impl",
- "usdt-macro",
+ "usdt-attr-macro 0.3.5",
+ "usdt-impl 0.3.5",
+ "usdt-macro 0.3.5",
+]
+
+[[package]]
+name = "usdt"
+version = "0.5.0"
+source = "git+https://github.com/oxidecomputer/usdt?branch=cargo-release#6b419ebfb2bbbbe728707241d5c6c1e51822a776"
+dependencies = [
+ "dof 0.3.0",
+ "dtrace-parser 0.2.0",
+ "goblin",
+ "memmap",
+ "serde",
+ "usdt-attr-macro 0.5.0",
+ "usdt-impl 0.5.0",
+ "usdt-macro 0.5.0",
 ]
 
 [[package]]
@@ -9385,12 +9478,25 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80e6ae4f982ae74dcbaa8eb17baf36ca0d464a3abc8a7172b3bd74c73e9505d6"
 dependencies = [
- "dtrace-parser",
+ "dtrace-parser 0.1.14",
  "proc-macro2",
  "quote",
  "serde_tokenstream 0.1.7",
  "syn 1.0.109",
- "usdt-impl",
+ "usdt-impl 0.3.5",
+]
+
+[[package]]
+name = "usdt-attr-macro"
+version = "0.5.0"
+source = "git+https://github.com/oxidecomputer/usdt?branch=cargo-release#6b419ebfb2bbbbe728707241d5c6c1e51822a776"
+dependencies = [
+ "dtrace-parser 0.2.0",
+ "proc-macro2",
+ "quote",
+ "serde_tokenstream 0.2.0",
+ "syn 2.0.32",
+ "usdt-impl 0.5.0",
 ]
 
 [[package]]
@@ -9400,8 +9506,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f53b4ca0b33aae466dc47b30b98adc4f88454928837af8010b6ed02d18474cb1"
 dependencies = [
  "byteorder",
- "dof",
- "dtrace-parser",
+ "dof 0.1.5",
+ "dtrace-parser 0.1.14",
  "libc",
  "proc-macro2",
  "quote",
@@ -9414,17 +9520,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "usdt-impl"
+version = "0.5.0"
+source = "git+https://github.com/oxidecomputer/usdt?branch=cargo-release#6b419ebfb2bbbbe728707241d5c6c1e51822a776"
+dependencies = [
+ "byteorder",
+ "dof 0.3.0",
+ "dtrace-parser 0.2.0",
+ "libc",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.32",
+ "thiserror",
+ "thread-id",
+ "version_check",
+]
+
+[[package]]
 name = "usdt-macro"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cb093f9653dc91632621c754f9ed4ee25d14e46e0239b6ccaf74a6c0c2788bd"
 dependencies = [
- "dtrace-parser",
+ "dtrace-parser 0.1.14",
  "proc-macro2",
  "quote",
  "serde_tokenstream 0.1.7",
  "syn 1.0.109",
- "usdt-impl",
+ "usdt-impl 0.3.5",
+]
+
+[[package]]
+name = "usdt-macro"
+version = "0.5.0"
+source = "git+https://github.com/oxidecomputer/usdt?branch=cargo-release#6b419ebfb2bbbbe728707241d5c6c1e51822a776"
+dependencies = [
+ "dtrace-parser 0.2.0",
+ "proc-macro2",
+ "quote",
+ "serde_tokenstream 0.2.0",
+ "syn 2.0.32",
+ "usdt-impl 0.5.0",
 ]
 
 [[package]]
@@ -10150,6 +10288,9 @@ dependencies = [
  "cargo_metadata",
  "cargo_toml",
  "clap 4.4.3",
+ "serde",
+ "serde_json",
+ "usdt 0.5.0",
 ]
 
 [[package]]
