@@ -2170,7 +2170,9 @@ mod illumos_tests {
     use super::ZoneBundler;
     use super::ZFS;
     use anyhow::Context;
+    use chrono::DateTime;
     use chrono::TimeZone;
+    use chrono::Timelike;
     use chrono::Utc;
     use illumos_utils::zpool::ZpoolName;
     use sled_storage::disk::RawDisk;
@@ -2179,6 +2181,43 @@ mod illumos_tests {
     use slog::Drain;
     use slog::Logger;
     use tokio::process::Command;
+
+    /// An iterator that returns the date of consecutive days beginning with 1st
+    /// January 2020. The time portion of each returned date will be fixed at
+    /// midnight in UTC.
+    struct DaysOfOurBundles {
+        next: DateTime<Utc>,
+    }
+
+    impl DaysOfOurBundles {
+        fn new() -> DaysOfOurBundles {
+            DaysOfOurBundles {
+                next: Utc
+                    // Set the start date to 1st January 2020:
+                    .with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+                    .single()
+                    .unwrap(),
+            }
+        }
+    }
+
+    impl Iterator for DaysOfOurBundles {
+        type Item = DateTime<Utc>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let out = self.next;
+
+            // We promise that all returned dates are aligned with midnight UTC:
+            assert_eq!(out.hour(), 0);
+            assert_eq!(out.minute(), 0);
+            assert_eq!(out.second(), 0);
+
+            self.next =
+                self.next.checked_add_days(chrono::Days::new(1)).unwrap();
+
+            Some(out)
+        }
+    }
 
     #[tokio::test]
     async fn test_zfs_quota() {
@@ -2440,9 +2479,7 @@ mod illumos_tests {
         // back.
         let info = insert_fake_bundle(
             &paths[0],
-            2020,
-            1,
-            1,
+            DaysOfOurBundles::new().next().unwrap(),
             ZoneBundleCause::ExplicitRequest,
         )
         .await?;
@@ -2513,7 +2550,7 @@ mod illumos_tests {
             .await
             .context("failed to update cleanup context")?;
 
-        let mut day = 1;
+        let mut days = DaysOfOurBundles::new();
         let mut info = Vec::new();
         let mut utilization = ctx.bundler.utilization().await?;
         loop {
@@ -2526,13 +2563,10 @@ mod illumos_tests {
             }
             let it = insert_fake_bundle(
                 &ctx.resource_wrapper.dirs[0],
-                2020,
-                1,
-                day,
+                days.next().unwrap(),
                 ZoneBundleCause::ExplicitRequest,
             )
             .await?;
-            day += 1;
             info.push(it);
             utilization = ctx.bundler.utilization().await?;
         }
@@ -2580,20 +2614,17 @@ mod illumos_tests {
     async fn test_list_with_filter_body(
         ctx: CleanupTestContext,
     ) -> anyhow::Result<()> {
-        let mut day = 1;
+        let mut days = DaysOfOurBundles::new();
         let mut info = Vec::new();
         const N_BUNDLES: usize = 3;
         for i in 0..N_BUNDLES {
             let it = insert_fake_bundle_with_zone_name(
                 &ctx.resource_wrapper.dirs[0],
-                2020,
-                1,
-                day,
+                days.next().unwrap(),
                 ZoneBundleCause::ExplicitRequest,
                 format!("oxz_whatever_{i}").as_str(),
             )
             .await?;
-            day += 1;
             info.push(it);
         }
 
@@ -2640,16 +2671,12 @@ mod illumos_tests {
 
     async fn insert_fake_bundle(
         dir: &Utf8Path,
-        year: i32,
-        month: u32,
-        day: u32,
+        time_created: DateTime<Utc>,
         cause: ZoneBundleCause,
     ) -> anyhow::Result<ZoneBundleInfo> {
         insert_fake_bundle_with_zone_name(
             dir,
-            year,
-            month,
-            day,
+            time_created,
             cause,
             "oxz_whatever",
         )
@@ -2658,21 +2685,20 @@ mod illumos_tests {
 
     async fn insert_fake_bundle_with_zone_name(
         dir: &Utf8Path,
-        year: i32,
-        month: u32,
-        day: u32,
+        time_created: DateTime<Utc>,
         cause: ZoneBundleCause,
         zone_name: &str,
     ) -> anyhow::Result<ZoneBundleInfo> {
+        assert_eq!(time_created.hour(), 0);
+        assert_eq!(time_created.minute(), 0);
+        assert_eq!(time_created.second(), 0);
+
         let metadata = ZoneBundleMetadata {
             id: ZoneBundleId {
                 zone_name: String::from(zone_name),
                 bundle_id: uuid::Uuid::new_v4(),
             },
-            time_created: Utc
-                .with_ymd_and_hms(year, month, day, 0, 0, 0)
-                .single()
-                .context("invalid year/month/day")?,
+            time_created,
             cause,
             version: 0,
         };
