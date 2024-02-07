@@ -32,6 +32,13 @@ jobs:
     - name: Disable packages.microsoft.com repo
       if: ${{ startsWith(matrix.os, 'ubuntu') }}
       run: sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list
+    - name: Pin libxmlsec1 to 1.3.3
+      if: ${{ startsWith(matrix.os, 'macos') }}
+      run: |
+        curl -fLOsS --retry 5 https://raw.githubusercontent.com/Homebrew/homebrew-core/f730dce02e025ee74910061dbd979f5a9375ed90/Formula/lib/libxmlsec1.rb
+        brew install ./libxmlsec1.rb
+        brew pin libxmlsec1
+        rm -f libxmlsec1.rb
     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       with:
         ref: ${{ github.event.pull_request.head.sha }} # see omicron#4461
