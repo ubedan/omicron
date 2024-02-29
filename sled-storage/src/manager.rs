@@ -6,10 +6,10 @@
 
 use std::collections::HashSet;
 
-use crate::dataset::{DatasetError, DatasetName};
-use crate::disk::{Disk, DiskError, RawDisk};
+use crate::dataset::DatasetName;
+use crate::disk::{Disk, RawDisk};
 use crate::error::Error;
-use crate::resources::{AddDiskResult, StorageResources};
+use crate::resources::{AddDiskResult, ManagedDisk, StorageResources};
 use camino::Utf8PathBuf;
 use illumos_utils::zfs::{Mountpoint, Zfs};
 use illumos_utils::zpool::ZpoolName;
@@ -64,13 +64,36 @@ struct NewFilesystemRequest {
     responder: oneshot::Sender<Result<(), Error>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ManageDiskRequest {
+    disk: DiskIdentity,
+    disk_id: Uuid,
+    pool_id: Uuid,
+}
+
 #[derive(Debug)]
 enum StorageRequest {
-    AddDisk(RawDisk),
-    RemoveDisk(RawDisk),
+    // Requests to manage which devices the sled considers active.
+    // These are manipulated by hardware management.
+    DetectedRawDisk(RawDisk),
+    DetectedRawDiskRemoval(RawDisk),
     DisksChanged(HashSet<RawDisk>),
+
+    // Requests to explicitly manage or stop managing a device.
+    StartManaging {
+        request: ManageDiskRequest,
+        tx: oneshot::Sender<Result<(), Error>>,
+    },
+    StopManaging {
+        disk: DiskIdentity,
+        tx: oneshot::Sender<Result<(), Error>>,
+    },
+
+    // Requests the creation of a new dataset within a managed disk.
     NewFilesystem(NewFilesystemRequest),
+
     KeyManagerReady,
+
     /// This will always grab the latest state after any new updates, as it
     /// serializes through the `StorageManager` task after all prior requests.
     /// This serialization is particularly useful for tests.
@@ -85,7 +108,6 @@ enum StorageRequest {
 #[derive(Debug, Clone)]
 pub struct StorageManagerData {
     pub state: StorageManagerState,
-    pub queued_u2_drives: HashSet<RawDisk>,
 }
 
 /// A mechanism for interacting with the [`StorageManager`]
@@ -97,20 +119,20 @@ pub struct StorageHandle {
 
 impl StorageHandle {
     /// Adds a disk and associated zpool to the storage manager.
-    pub async fn upsert_disk(&self, disk: RawDisk) {
-        self.tx.send(StorageRequest::AddDisk(disk)).await.unwrap();
+    pub async fn detected_raw_disk(&self, disk: RawDisk) {
+        self.tx.send(StorageRequest::DetectedRawDisk(disk)).await.unwrap();
     }
 
     /// Removes a disk, if it's tracked by the storage manager, as well
     /// as any associated zpools.
-    pub async fn delete_disk(&self, disk: RawDisk) {
-        self.tx.send(StorageRequest::RemoveDisk(disk)).await.unwrap();
+    pub async fn detected_raw_disk_removal(&self, disk: RawDisk) {
+        self.tx.send(StorageRequest::DetectedRawDiskRemoval(disk)).await.unwrap();
     }
 
     /// Ensures that the storage manager tracks exactly the provided disks.
     ///
-    /// This acts similar to a batch [Self::upsert_disk] for all new disks, and
-    /// [Self::delete_disk] for all removed disks.
+    /// This acts similar to a batch [Self::detected_raw_disk] for all new disks, and
+    /// [Self::detected_raw_disk_removal] for all removed disks.
     ///
     /// If errors occur, an arbitrary "one" of them will be returned, but a
     /// best-effort attempt to add all disks will still be attempted.
@@ -122,6 +144,41 @@ impl StorageHandle {
             .send(StorageRequest::DisksChanged(raw_disks.into_iter().collect()))
             .await
             .unwrap();
+    }
+
+    pub async fn add_disk_to_control_plane(
+        &self,
+        disk: DiskIdentity,
+        disk_id: Uuid,
+        pool_id: Uuid,
+    ) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(StorageRequest::StartManaging {
+                request: ManageDiskRequest {
+                    disk,
+                    disk_id,
+                    pool_id,
+                },
+                tx
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    pub async fn remove_disk_from_control_plane(
+        &self,
+        disk: DiskIdentity,
+    ) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(StorageRequest::StopManaging { disk, tx })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
     }
 
     /// Notify the [`StorageManager`] that the [`key_manager::KeyManager`]
@@ -214,8 +271,8 @@ impl FakeStorageManager {
     pub async fn run(mut self) {
         loop {
             match self.rx.recv().await {
-                Some(StorageRequest::AddDisk(raw_disk)) => {
-                    if self.add_disk(raw_disk).disk_inserted() {
+                Some(StorageRequest::DetectedRawDisk(raw_disk)) => {
+                    if self.detected_disk(raw_disk).disk_inserted() {
                         self.resource_updates
                             .send_replace(self.resources.clone());
                     }
@@ -232,7 +289,7 @@ impl FakeStorageManager {
     }
 
     // Add a disk to `StorageResources` if it is new and return true if so
-    fn add_disk(&mut self, raw_disk: RawDisk) -> AddDiskResult {
+    fn detected_disk(&mut self, raw_disk: RawDisk) -> AddDiskResult {
         let disk = match raw_disk {
             RawDisk::Real(_) => {
                 panic!(
@@ -257,7 +314,6 @@ pub struct StorageManager {
     tx: mpsc::Sender<StorageRequest>,
     rx: mpsc::Receiver<StorageRequest>,
     resources: StorageResources,
-    queued_u2_drives: HashSet<RawDisk>,
     key_requester: StorageKeyRequester,
     resource_updates: watch::Sender<StorageResources>,
     last_logged_capacity: usize,
@@ -278,7 +334,6 @@ impl StorageManager {
                 tx: tx.clone(),
                 rx,
                 resources,
-                queued_u2_drives: HashSet::new(),
                 key_requester,
                 resource_updates: update_tx,
                 last_logged_capacity: QUEUE_SIZE,
@@ -299,13 +354,6 @@ impl StorageManager {
                 res = self.step() => {
                     if let Err(e) = res {
                         warn!(self.log, "{e}");
-                    }
-                }
-                _ = interval.tick(),
-                    if self.state == StorageManagerState::QueueingDisks =>
-                {
-                    if self.add_queued_disks().await {
-                        let _ = self.resource_updates.send_replace(self.resources.clone());
                     }
                 }
             }
@@ -345,12 +393,23 @@ impl StorageManager {
         let req = self.rx.recv().await.unwrap();
         info!(self.log, "Received {:?}", req);
         let should_send_updates = match req {
-            StorageRequest::AddDisk(raw_disk) => {
-                self.add_disk(raw_disk).await?.disk_inserted()
+            StorageRequest::DetectedRawDisk(raw_disk) => {
+                self.detected_disk(raw_disk).await?.disk_inserted()
             }
-            StorageRequest::RemoveDisk(raw_disk) => self.remove_disk(raw_disk),
+            StorageRequest::DetectedRawDiskRemoval(raw_disk) => {
+                self.detected_disk_removal(raw_disk)
+            }
             StorageRequest::DisksChanged(raw_disks) => {
                 self.ensure_using_exactly_these_disks(raw_disks).await
+            }
+            StorageRequest::StartManaging { request, tx } => {
+                let result = self.manage_u2_disk(request).await;
+                let inserted = result.as_ref().map(|r| r.disk_inserted()).unwrap_or(false);
+                let _ = tx.send(result.map(|_| ()));
+                inserted
+            }
+            StorageRequest::StopManaging { disk: _, tx: _ } => {
+                todo!()
             }
             StorageRequest::NewFilesystem(request) => {
                 let result = self.add_dataset(&request).await;
@@ -362,7 +421,7 @@ impl StorageManager {
             }
             StorageRequest::KeyManagerReady => {
                 self.state = StorageManagerState::Normal;
-                self.add_queued_disks().await
+                false
             }
             StorageRequest::GetLatestResources(tx) => {
                 let _ = tx.send(self.resources.clone());
@@ -371,7 +430,6 @@ impl StorageManager {
             StorageRequest::GetManagerState(tx) => {
                 let _ = tx.send(StorageManagerData {
                     state: self.state,
-                    queued_u2_drives: self.queued_u2_drives.clone(),
                 });
                 false
             }
@@ -384,94 +442,80 @@ impl StorageManager {
         Ok(())
     }
 
-    // Loop through all queued disks inserting them into [`StorageResources`]
-    // unless we hit a transient error. If we hit a transient error, we return
-    // and wait for the next retry window to re-call this method. If we hit a
-    // permanent error we log it, but we continue inserting queued disks.
+    // Manages a newly detected disk that has been attached to this sled.
     //
-    // Return true if updates should be sent to watchers, false otherwise
-    async fn add_queued_disks(&mut self) -> bool {
-        info!(
-            self.log,
-            "Attempting to add queued disks";
-            "num_disks" => %self.queued_u2_drives.len()
-        );
-        self.state = StorageManagerState::Normal;
-
-        let mut send_updates = false;
-
-        // Disks that should be requeued.
-        let queued = self.queued_u2_drives.clone();
-        let mut to_dequeue = HashSet::new();
-        for disk in queued.iter() {
-            if self.state == StorageManagerState::QueueingDisks {
-                // We hit a transient error in a prior iteration.
-                break;
-            } else {
-                match self.add_u2_disk(disk.clone()).await {
-                    Err(_) => {
-                        // This is an unrecoverable error, so we don't queue the
-                        // disk again.
-                        to_dequeue.insert(disk);
-                    }
-                    Ok(AddDiskResult::DiskInserted) => {
-                        send_updates = true;
-                        to_dequeue.insert(disk);
-                    }
-                    Ok(AddDiskResult::DiskAlreadyInserted) => {
-                        to_dequeue.insert(disk);
-                    }
-                    Ok(AddDiskResult::DiskQueued) => (),
-                }
-            }
-        }
-        // Dequeue any inserted disks
-        self.queued_u2_drives.retain(|k| !to_dequeue.contains(k));
-        send_updates
-    }
-
-    // Add a disk to `StorageResources` if it is new,
-    // updated, or its pool has been updated as determined by
-    // [`$crate::resources::StorageResources::insert_disk`] and we decide not to
-    // queue the disk for later addition.
-    async fn add_disk(
+    // For U.2s: we update our inventory.
+    // For M.2s: we do the same, but also begin "managing" the disk so
+    // it can automatically be in-use.
+    async fn detected_disk(
         &mut self,
         raw_disk: RawDisk,
     ) -> Result<AddDiskResult, Error> {
         match raw_disk.variant() {
-            DiskVariant::U2 => self.add_u2_disk(raw_disk).await,
+            DiskVariant::U2 => self.resources.insert_raw_disk(raw_disk),
             DiskVariant::M2 => self.add_m2_disk(raw_disk).await,
         }
     }
 
-    // Add a U.2 disk to [`StorageResources`] or queue it to be added later
-    async fn add_u2_disk(
+    // Makes an U.2 disk managed by the control plane within [`StorageResources`].
+    async fn manage_u2_disk(
         &mut self,
-        raw_disk: RawDisk,
+        ManageDiskRequest {
+            disk: disk_identity,
+            disk_id,
+            pool_id,
+        }: ManageDiskRequest,
     ) -> Result<AddDiskResult, Error> {
+        let raw_disk = match self.resources.get_disk(&disk_identity)? {
+            ManagedDisk::Managed { .. } => {
+                return Ok(AddDiskResult::DiskAlreadyInserted);
+            },
+            ManagedDisk::Unmanaged(raw) => raw,
+        };
+
+
+        // TODO: SCHEMA
+        // - Add a schema-wrapped json representation of "all U.2s managed by
+        // the control plane".
+        // - Perhaps go hit up the ledger?
+        //
+        // TODO: LOADING SCHEMA
+        // - Take advantage of the tokio select loop in this file to
+        // "auto-manage" any disks that exist, and are in this ledger, before we
+        // boot. Would be cool to do this before any "manage_u2_disk" requests
+        // could arrive and see changing state.
+        //
+        // TODO: UPDATING SCHEMA
+        // - Whenever we get a request from Nexus (... or RSS?) update the set
+        // of physical disks which we're trying to manage.
+        // - It may actually make sense for this to contain "all physical disks
+        // and their zpools" that are known within the control plane?
+        //
+        // Something like:
+        //
+        // Request {
+        //    generation # from nexus,
+        //    vec of [ id: vendor/serial/model, uuid, pool id],
+        // }
+        //
+        // Then, similar to services: we keep trying to "make it so".
+        //
+        // Can also expose an API for "managed disks" to make it clear what
+        // we're up to. Would be cool to diff this with inventory via omdb.
+
+
         if self.state != StorageManagerState::Normal {
-            self.queued_u2_drives.insert(raw_disk);
-            return Ok(AddDiskResult::DiskQueued);
+            return Err(Error::KeyManagerNotReady);
         }
 
         match Disk::new(&self.log, raw_disk.clone(), Some(&self.key_requester))
             .await
         {
-            Ok(disk) => self.resources.insert_disk(disk),
-            Err(err @ DiskError::Dataset(DatasetError::KeyManager(_))) => {
-                warn!(
-                    self.log,
-                    "Transient error: {err}: queuing disk";
-                    "disk_id" => ?raw_disk.identity()
-                );
-                self.queued_u2_drives.insert(raw_disk);
-                self.state = StorageManagerState::QueueingDisks;
-                Ok(AddDiskResult::DiskQueued)
-            }
+            Ok(disk) => self.resources.insert_managed_disk(disk),
             Err(err) => {
                 error!(
                     self.log,
-                    "Persistent error:not queueing disk";
+                    "Persistent error";
                     "err" => ?err,
                     "disk_id" => ?raw_disk.identity()
                 );
@@ -480,11 +524,8 @@ impl StorageManager {
         }
     }
 
-    // Add a U.2 disk to [`StorageResources`] if new and return `Ok(true)` if so
-    //
-    //
-    // We never queue M.2 drives, as they don't rely on [`KeyManager`] based
-    // encryption
+    // Add a U.2 disk to [`StorageResources`] if new and return `Ok(true)` if
+    // so.
     async fn add_m2_disk(
         &mut self,
         raw_disk: RawDisk,
@@ -492,13 +533,11 @@ impl StorageManager {
         let disk =
             Disk::new(&self.log, raw_disk.clone(), Some(&self.key_requester))
                 .await?;
-        self.resources.insert_disk(disk)
+        self.resources.insert_managed_disk(disk)
     }
 
     // Delete a real disk and return `true` if the disk was actually removed
-    fn remove_disk(&mut self, raw_disk: RawDisk) -> bool {
-        // If the disk is a U.2, we want to first delete it from any queued disks
-        let _ = self.queued_u2_drives.remove(&raw_disk);
+    fn detected_disk_removal(&mut self, raw_disk: RawDisk) -> bool {
         self.resources.remove_disk(raw_disk.identity())
     }
 
@@ -512,19 +551,14 @@ impl StorageManager {
     ) -> bool {
         let mut should_update = false;
 
-        // Clear out any queued U.2 disks that are real.
-        // We keep synthetic disks, as they are only added once.
-        self.queued_u2_drives.retain(|d| d.is_synthetic());
-
         let all_ids: HashSet<_> =
             raw_disks.iter().map(|d| d.identity()).collect();
 
         // Find all existing disks not in the current set
         let to_remove: Vec<DiskIdentity> = self
             .resources
-            .disks()
-            .keys()
-            .filter_map(|id| {
+            .all_disks()
+            .filter_map(|(id, _variant)| {
                 if !all_ids.contains(id) {
                     Some(id.clone())
                 } else {
@@ -541,7 +575,7 @@ impl StorageManager {
 
         for raw_disk in raw_disks {
             let disk_id = raw_disk.identity().clone();
-            match self.add_disk(raw_disk).await {
+            match self.detected_disk(raw_disk).await {
                 Ok(AddDiskResult::DiskInserted) => should_update = true,
                 Ok(_) => (),
                 Err(err) => {
@@ -565,9 +599,8 @@ impl StorageManager {
         info!(self.log, "add_dataset: {:?}", request);
         if !self
             .resources
-            .disks()
-            .values()
-            .any(|(_, pool)| &pool.name == request.dataset_name.pool())
+            .managed_disks()
+            .any(|(_, disk)| disk.zpool_name() == request.dataset_name.pool())
         {
             return Err(Error::ZpoolNotFound(format!(
                 "{}, looked up while trying to add dataset",
@@ -690,14 +723,14 @@ mod tests {
         assert_eq!(StorageManagerState::WaitingForKeyManager, manager.state);
         manager.add_u2_disk(raw_disk.clone()).await.unwrap();
         assert!(manager.resources.all_u2_zpools().is_empty());
-        assert_eq!(manager.queued_u2_drives, HashSet::from([raw_disk.clone()]));
+        assert_eq!(manager.queued_manage_disk_requests, HashSet::from([raw_disk.clone()]));
 
         // Check other non-normal stages and ensure disk gets queued
-        manager.queued_u2_drives.clear();
+        manager.queued_manage_disk_requests.clear();
         manager.state = StorageManagerState::QueueingDisks;
         manager.add_u2_disk(raw_disk.clone()).await.unwrap();
         assert!(manager.resources.all_u2_zpools().is_empty());
-        assert_eq!(manager.queued_u2_drives, HashSet::from([raw_disk]));
+        assert_eq!(manager.queued_manage_disk_requests, HashSet::from([raw_disk]));
         logctx.cleanup_successful();
     }
 
@@ -744,7 +777,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let disk = SyntheticDisk::create_zpool(dir.path(), &zpool_name).into();
 
-        handle.upsert_disk(disk).await;
+        handle.detected_raw_disk(disk).await;
         handle.wait_for_boot_disk().await;
         Zpool::destroy(&zpool_name).unwrap();
         logctx.cleanup_successful();
@@ -771,7 +804,7 @@ mod tests {
         let zpool_name = ZpoolName::new_external(Uuid::new_v4());
         let dir = tempdir().unwrap();
         let disk = SyntheticDisk::create_zpool(dir.path(), &zpool_name).into();
-        handle.upsert_disk(disk).await;
+        handle.detected_raw_disk(disk).await;
         let resources = handle.get_latest_resources().await;
         assert!(resources.all_u2_zpools().is_empty());
 
@@ -809,7 +842,7 @@ mod tests {
         let zpool_name = ZpoolName::new_external(Uuid::new_v4());
         let dir = tempdir().unwrap();
         let disk = SyntheticDisk::create_zpool(dir.path(), &zpool_name).into();
-        handle.upsert_disk(disk).await;
+        handle.detected_raw_disk(disk).await;
         manager.step().await.unwrap();
 
         // We can't wait for a reply through the handle as the storage manager task
@@ -841,9 +874,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_disk_triggers_notification() {
+    async fn detected_raw_disk_removal_triggers_notification() {
         illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
-        let logctx = test_setup_log("delete_disk_triggers_notification");
+        let logctx = test_setup_log("detected_raw_disk_removal_triggers_notification");
         let (mut key_manager, key_requester) =
             KeyManager::new(&logctx.log, HardcodedSecretRetriever::default());
         let (manager, mut handle) =
@@ -866,14 +899,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let disk: RawDisk =
             SyntheticDisk::create_zpool(dir.path(), &zpool_name).into();
-        handle.upsert_disk(disk.clone()).await;
+        handle.detected_raw_disk(disk.clone()).await;
 
         // Wait for the add disk notification
         let resources = handle.wait_for_changes().await;
         assert_eq!(resources.all_u2_zpools().len(), 1);
 
         // Delete the disk and wait for a notification
-        handle.delete_disk(disk).await;
+        handle.detected_raw_disk_removal(disk).await;
         let resources = handle.wait_for_changes().await;
         assert!(resources.all_u2_zpools().is_empty());
 
@@ -915,7 +948,7 @@ mod tests {
             .ensure_using_exactly_these_disks(disks.iter().take(3).cloned())
             .await;
         let state = handle.get_manager_state().await;
-        assert_eq!(state.queued_u2_drives.len(), 3);
+        assert_eq!(state.queued_manage_disk_requests.len(), 3);
         assert_eq!(state.state, StorageManagerState::WaitingForKeyManager);
         assert!(handle.get_latest_resources().await.all_u2_zpools().is_empty());
 
@@ -1021,7 +1054,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let disk: RawDisk =
             SyntheticDisk::create_zpool(dir.path(), &zpool_name).into();
-        handle.upsert_disk(disk.clone()).await;
+        handle.detected_raw_disk(disk.clone()).await;
 
         // Create a filesystem
         let dataset_id = Uuid::new_v4();

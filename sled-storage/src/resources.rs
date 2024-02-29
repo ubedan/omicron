@@ -5,7 +5,7 @@
 //! Discovered and usable disks and zpools
 
 use crate::dataset::M2_DEBUG_DATASET;
-use crate::disk::Disk;
+use crate::disk::{Disk, RawDisk};
 use crate::error::Error;
 use crate::pool::Pool;
 use camino::Utf8PathBuf;
@@ -37,6 +37,26 @@ impl AddDiskResult {
     }
 }
 
+// The Sled Agent is responsible for both observing disks and managing them at
+// the request of the broader control plane. This enum encompasses that duality,
+// by representing all disks that can exist, managed or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedDisk {
+    // A disk managed by the control plane.
+    Managed {
+        disk: Disk,
+        // TODO: I think you could maybe remove this??
+        // TODO: Does it really make sense to co-locate the zpool here?
+        pool: Pool,
+    },
+    // A disk which has been observed by the sled, but which is not yet being
+    // managed by the control plane.
+    //
+    // This disk should be treated as "read-only" until we're explicitly told to
+    // use it.
+    Unmanaged(RawDisk),
+}
+
 /// Storage related resources: disks and zpools
 ///
 /// This state is internal to the [`crate::manager::StorageManager`] task. Clones
@@ -55,13 +75,52 @@ impl AddDiskResult {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StorageResources {
     // All disks, real and synthetic, being managed by this sled
-    disks: Arc<BTreeMap<DiskIdentity, (Disk, Pool)>>,
+    disks: Arc<BTreeMap<DiskIdentity, ManagedDisk>>,
 }
 
 impl StorageResources {
-    /// Return a reference to the current snapshot of disks
-    pub fn disks(&self) -> &BTreeMap<DiskIdentity, (Disk, Pool)> {
-        &self.disks
+    /// Returns an iterator over all disks, managed or not.
+    pub fn all_disks(&self) -> impl Iterator<Item = (&DiskIdentity, DiskVariant)> {
+        self.disks.iter().map(|(identity, disk)| {
+            match disk {
+                ManagedDisk::Managed { disk, ..  } => (identity, disk.variant()),
+                ManagedDisk::Unmanaged(raw) => (identity, raw.variant()),
+            }
+        })
+    }
+
+    /// Returns an iterator over all managed disks.
+    pub fn managed_disks(&self) -> impl Iterator<Item = (&DiskIdentity, &Disk)> {
+        self.disks.iter().filter_map(|(identity, disk)| {
+            match disk {
+                ManagedDisk::Managed { disk, .. } => Some((identity, disk)),
+                _ => None
+            }
+        })
+    }
+
+    pub(crate) fn get_disk(
+        &self,
+        disk_identity: &DiskIdentity,
+    ) -> Result<&ManagedDisk, Error> {
+        let Some(disk) = self.disks.get(disk_identity) else {
+            return Err(Error::PhysicalDiskNotFound);
+        };
+        Ok(disk)
+    }
+
+    /// Updates the known set of resources to include a new "unmanaged" disk,
+    /// unless that disk already exists.
+    pub(crate) fn insert_raw_disk(
+        &mut self,
+        disk: RawDisk,
+    ) -> Result<AddDiskResult, Error> {
+        let disk_id = disk.identity().clone();
+        if self.disks.contains_key(&disk_id) {
+            return Ok(AddDiskResult::DiskAlreadyInserted);
+        }
+        Arc::make_mut(&mut self.disks).insert(disk_id, ManagedDisk::Unmanaged(disk));
+        Ok(AddDiskResult::DiskInserted)
     }
 
     /// Insert a disk and its zpool
@@ -72,24 +131,38 @@ impl StorageResources {
     /// For instance, if only the pool health changes, because it is not one
     /// of the checked values, we will not insert the update and will return
     /// `DiskAlreadyInserted`.
-    pub(crate) fn insert_disk(
+    pub(crate) fn insert_managed_disk(
         &mut self,
         disk: Disk,
     ) -> Result<AddDiskResult, Error> {
         let disk_id = disk.identity().clone();
         let zpool_name = disk.zpool_name().clone();
         let zpool = Pool::new(zpool_name, disk_id.clone())?;
-        if let Some((stored_disk, stored_pool)) = self.disks.get(&disk_id) {
-            if stored_disk == &disk
-                && stored_pool.info.size() == zpool.info.size()
-                && stored_pool.name == zpool.name
-            {
-                return Ok(AddDiskResult::DiskAlreadyInserted);
+        if let Some(entry) = self.disks.get(&disk_id) {
+            if let ManagedDisk::Managed { disk: stored_disk, pool: stored_pool } = entry {
+                if stored_disk == &disk
+                    && stored_pool.info.size() == zpool.info.size()
+                    && stored_pool.name == zpool.name
+                {
+                    return Ok(AddDiskResult::DiskAlreadyInserted);
+                }
             }
         }
         // Either the disk or zpool changed
-        Arc::make_mut(&mut self.disks).insert(disk_id, (disk, zpool));
+        Arc::make_mut(&mut self.disks).insert(disk_id, ManagedDisk::Managed { disk, pool: zpool });
         Ok(AddDiskResult::DiskInserted)
+    }
+
+    pub(crate) fn unmanage_disk(
+        &mut self,
+        disk_identity: DiskIdentity,
+    ) -> Result<(), Error> {
+        let disks = Arc::make_mut(&mut self.disks);
+        let Some(_entry) = disks.get_mut(&disk_identity) else {
+            return Err(Error::PhysicalDiskNotFound);
+        };
+
+        todo!();
     }
 
     /// Insert a disk while creating a fake pool
@@ -104,7 +177,7 @@ impl StorageResources {
             return AddDiskResult::DiskAlreadyInserted;
         }
         // Either the disk or zpool changed
-        Arc::make_mut(&mut self.disks).insert(disk_id, (disk, zpool));
+        Arc::make_mut(&mut self.disks).insert(disk_id, ManagedDisk::Managed { disk, pool: zpool });
         AddDiskResult::DiskInserted
     }
 
@@ -115,19 +188,27 @@ impl StorageResources {
     /// Note: We never allow removal of synthetic disks in production as they
     /// are only added once.
     pub(crate) fn remove_disk(&mut self, id: &DiskIdentity) -> bool {
-        let Some((disk, _)) = self.disks.get(id) else {
+        let Some(entry) = self.disks.get(id) else {
             return false;
+        };
+        let synthetic = match entry {
+            ManagedDisk::Managed { disk, .. } => {
+                disk.is_synthetic()
+            },
+            ManagedDisk::Unmanaged(raw) => {
+                raw.is_synthetic()
+            }
         };
 
         cfg_if! {
             if #[cfg(test)] {
                 // For testing purposes, we allow synthetic disks to be deleted.
                 // Silence an unused variable warning.
-                _ = disk;
+                _ = synthetic;
             } else {
                 // In production, we disallow removal of synthetic disks as they
                 // are only added once.
-                if disk.is_synthetic() {
+                if synthetic {
                     return false;
                 }
             }
@@ -142,9 +223,11 @@ impl StorageResources {
     ///
     /// If this returns `None`, we have not processed the boot disk yet.
     pub fn boot_disk(&self) -> Option<(DiskIdentity, ZpoolName)> {
-        for (id, (disk, _)) in self.disks.iter() {
-            if disk.is_boot_disk() {
-                return Some((id.clone(), disk.zpool_name().clone()));
+        for (id, disk) in self.disks.iter() {
+            if let ManagedDisk::Managed { disk, .. } = disk {
+                if disk.is_boot_disk() {
+                    return Some((id.clone(), disk.zpool_name().clone()));
+                }
             }
         }
         None
@@ -176,20 +259,31 @@ impl StorageResources {
             .collect()
     }
 
+    /// Returns all zpools managed by the control plane
     pub fn get_all_zpools(&self) -> Vec<(ZpoolName, DiskVariant)> {
         self.disks
             .values()
-            .map(|(disk, _)| (disk.zpool_name().clone(), disk.variant()))
+            .filter_map(|disk| {
+                if let ManagedDisk::Managed { disk, .. } = disk {
+                    Some((disk.zpool_name().clone(), disk.variant()))
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
-    // Returns all zpools of a particular variant
+    // Returns all zpools of a particular variant.
+    //
+    // Only returns zpools from disks actively being managed.
     fn all_zpools(&self, variant: DiskVariant) -> Vec<ZpoolName> {
         self.disks
             .values()
-            .filter_map(|(disk, _)| {
-                if disk.variant() == variant {
-                    return Some(disk.zpool_name().clone());
+            .filter_map(|disk| {
+                if let ManagedDisk::Managed { disk, .. } = disk {
+                    if disk.variant() == variant {
+                        return Some(disk.zpool_name().clone());
+                    }
                 }
                 None
             })

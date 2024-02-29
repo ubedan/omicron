@@ -89,13 +89,11 @@ use illumos_utils::dumpadm::{DumpAdm, DumpContentType};
 use illumos_utils::zone::ZONE_PREFIX;
 use illumos_utils::zpool::{ZpoolHealth, ZpoolName};
 use illumos_utils::ExecutionError;
-use omicron_common::disk::DiskIdentity;
 use sled_hardware::DiskVariant;
 use sled_storage::dataset::{CRASH_DATASET, DUMP_DATASET};
 use sled_storage::disk::Disk;
-use sled_storage::pool::Pool;
 use slog::Logger;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -195,13 +193,13 @@ impl DumpSetup {
 
     pub(crate) async fn update_dumpdev_setup(
         &self,
-        disks: &BTreeMap<DiskIdentity, (Disk, Pool)>,
+        disks: impl Iterator<Item = &Disk>,
     ) {
         let log = &self.log;
         let mut m2_dump_slices = Vec::new();
         let mut u2_debug_datasets = Vec::new();
         let mut m2_core_datasets = Vec::new();
-        for (_id, (disk, _)) in disks.iter() {
+        for disk in disks {
             if disk.is_synthetic() {
                 // We only setup dump devices on real disks
                 continue;

@@ -76,6 +76,12 @@ pub enum Error {
         err: uuid::Error,
     },
 
+    #[error("Not ready to manage U.2s (key manager is not ready)")]
+    KeyManagerNotReady,
+
+    #[error("Physical Disk was not found")]
+    PhysicalDiskNotFound,
+
     #[error("Zpool Not Found: {0}")]
     ZpoolNotFound(String),
 }

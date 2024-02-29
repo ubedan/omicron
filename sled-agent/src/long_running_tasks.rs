@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::hardware_monitor::HardwareMonitor;
 use crate::services::ServiceManager;
 use crate::sled_agent::SledAgent;
-use crate::storage_monitor::{StorageMonitor, UnderlayAccess};
+use crate::storage_monitor::StorageMonitor;
 use crate::zone_bundle::{CleanupContext, ZoneBundler};
 use bootstore::schemes::v0 as bootstore;
 use key_manager::{KeyManager, StorageKeyRequester};
@@ -65,14 +65,12 @@ pub async fn spawn_all_longrunning_tasks(
     LongRunningTaskHandles,
     oneshot::Sender<SledAgent>,
     oneshot::Sender<ServiceManager>,
-    oneshot::Sender<UnderlayAccess>,
 ) {
     let storage_key_requester = spawn_key_manager(log);
     let mut storage_manager =
         spawn_storage_manager(log, storage_key_requester.clone());
 
-    let underlay_available_tx =
-        spawn_storage_monitor(log, storage_manager.clone());
+    spawn_storage_monitor(log, storage_manager.clone());
 
     let hardware_manager = spawn_hardware_manager(log, sled_mode).await;
 
@@ -109,7 +107,6 @@ pub async fn spawn_all_longrunning_tasks(
         },
         sled_agent_started_tx,
         service_manager_ready_tx,
-        underlay_available_tx,
     )
 }
 
@@ -137,14 +134,13 @@ fn spawn_storage_manager(
 fn spawn_storage_monitor(
     log: &Logger,
     storage_handle: StorageHandle,
-) -> oneshot::Sender<UnderlayAccess> {
+) {
     info!(log, "Starting StorageMonitor");
-    let (storage_monitor, underlay_available_tx) =
+    let storage_monitor =
         StorageMonitor::new(log, storage_handle);
     tokio::spawn(async move {
         storage_monitor.run().await;
     });
-    underlay_available_tx
 }
 
 async fn spawn_hardware_manager(
@@ -235,7 +231,7 @@ async fn upsert_synthetic_zpools_if_needed(
                 pool.to_string()
             );
             let disk = SyntheticDisk::new(pool.clone()).into();
-            storage_manager.upsert_disk(disk).await;
+            storage_manager.detected_raw_disk(disk).await;
         }
     }
 }
