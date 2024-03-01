@@ -19,7 +19,6 @@ use omicron_common::api::internal::nexus::{
 use omicron_common::api::internal::shared::{
     NetworkInterface, SourceNatConfig,
 };
-use omicron_common::disk::DiskIdentity;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sled_hardware::Baseboard;
@@ -275,27 +274,8 @@ impl std::fmt::Display for ZoneType {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
-pub struct OmicronPhysicalDiskConfig {
-    pub identity: DiskIdentity,
-    pub id: Uuid,
-    pub pool_id: Uuid,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
-pub struct OmicronPhysicalDisksConfig {
-    /// generation number of this configuration
-    ///
-    /// This generation number is owned by the control plane (i.e., RSS or
-    /// Nexus, depending on whether RSS-to-Nexus handoff has happened).  It
-    /// should not be bumped within Sled Agent.
-    ///
-    /// Sled Agent rejects attempts to set the configuration to a generation
-    /// older than the one it's currently running.
-    pub generation: Generation,
-
-    pub disks: Vec<OmicronPhysicalDiskConfig>,
-}
+pub type OmicronPhysicalDiskConfig = sled_storage::disk::OmicronPhysicalDiskConfig;
+pub type OmicronPhysicalDisksConfig = sled_storage::disk::OmicronPhysicalDisksConfig;
 
 /// Generation 1 of `OmicronZonesConfig` is always the set of no zones.
 pub const OMICRON_ZONES_CONFIG_INITIAL_GENERATION: u32 = 1;

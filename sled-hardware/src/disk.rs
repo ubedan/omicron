@@ -32,6 +32,10 @@ pub enum PooledDiskError {
     BadPartitionLayout { path: Utf8PathBuf, why: String },
     #[error("Requested partition {partition:?} not found on device {path}")]
     NotFound { path: Utf8PathBuf, partition: Partition },
+    #[error("Zpool UUID required to format this disk")]
+    MissingZoolUuid,
+    #[error("Observed Zpool with unexpected UUID (saw: {observed}, expected: {expected})")]
+    UnexpectedUuid { expected: Uuid, observed: Uuid },
     #[error(transparent)]
     ZpoolCreate(#[from] illumos_utils::zpool::CreateError),
     #[error("Cannot import zpool: {0}")]
@@ -195,12 +199,13 @@ impl PooledDisk {
     pub fn new(
         log: &Logger,
         unparsed_disk: UnparsedDisk,
+        zpool_id: Option<Uuid>,
     ) -> Result<Self, PooledDiskError> {
         let paths = &unparsed_disk.paths;
         let variant = unparsed_disk.variant;
         // Ensure the GPT has the right format. This does not necessarily
         // mean that the partitions are populated with the data we need.
-        let partitions = ensure_partition_layout(&log, &paths, variant)?;
+        let partitions = ensure_partition_layout(&log, &paths, variant, zpool_id)?;
 
         // Find the path to the zpool which exists on this disk.
         //
@@ -212,7 +217,7 @@ impl PooledDisk {
             false,
         )?;
 
-        let zpool_name = Self::ensure_zpool_exists(log, variant, &zpool_path)?;
+        let zpool_name = Self::ensure_zpool_exists(log, variant, &zpool_path, zpool_id)?;
         Self::ensure_zpool_imported(log, &zpool_name)?;
         Self::ensure_zpool_failmode_is_continue(log, &zpool_name)?;
 
@@ -231,9 +236,20 @@ impl PooledDisk {
         log: &Logger,
         variant: DiskVariant,
         zpool_path: &Utf8Path,
+        zpool_id: Option<Uuid>,
     ) -> Result<ZpoolName, PooledDiskError> {
         let zpool_name = match Fstyp::get_zpool(&zpool_path) {
-            Ok(zpool_name) => zpool_name,
+            Ok(zpool_name) => {
+                if let Some(expected) = zpool_id {
+                    info!(log, "Checking that UUID in storage matches request"; "expected" => ?expected);
+                    let observed = zpool_name.id();
+                    if expected != observed {
+                        warn!(log, "Zpool UUID mismatch"; "expected" => ?expected, "observed" => ?observed);
+                        return Err(PooledDiskError::UnexpectedUuid { expected, observed });
+                    }
+                }
+                zpool_name
+            },
             Err(_) => {
                 // What happened here?
                 // - We saw that a GPT exists for this Disk (or we didn't, and
@@ -251,10 +267,22 @@ impl PooledDisk {
                     "GPT exists without Zpool: formatting zpool at {}",
                     zpool_path,
                 );
+                let id = match zpool_id {
+                    Some(id) => {
+                        info!(log, "Formatting zpool with requested ID"; "id" => ?id);
+                        id
+                    },
+                    None => {
+                        let id = Uuid::new_v4();
+                        info!(log, "Formatting zpool with generated ID"; "id" => ?id);
+                        id
+                    },
+                };
+
                 // If a zpool does not already exist, create one.
                 let zpool_name = match variant {
-                    DiskVariant::M2 => ZpoolName::new_internal(Uuid::new_v4()),
-                    DiskVariant::U2 => ZpoolName::new_external(Uuid::new_v4()),
+                    DiskVariant::M2 => ZpoolName::new_internal(id),
+                    DiskVariant::U2 => ZpoolName::new_external(id),
                 };
                 Zpool::create(&zpool_name, &zpool_path)?;
                 zpool_name

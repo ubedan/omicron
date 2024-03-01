@@ -8,6 +8,7 @@ use crate::dataset::{DatasetError, DatasetName};
 use crate::disk::DiskError;
 use camino::Utf8PathBuf;
 use omicron_common::api::external::ByteCountRangeError;
+use omicron_common::api::external::Generation;
 use uuid::Uuid;
 
 #[derive(thiserror::Error, Debug)]
@@ -81,6 +82,15 @@ pub enum Error {
 
     #[error("Physical Disk was not found")]
     PhysicalDiskNotFound,
+
+    #[error("Physical disk configuration out-of-date (asked for {requested}, but latest is {current})")]
+    PhysicalDiskConfigurationOutdated {
+        requested: Generation,
+        current: Generation,
+    },
+
+    #[error("Failed to update ledger in internal storage")]
+    Ledger(#[from] omicron_common::ledger::Error),
 
     #[error("Zpool Not Found: {0}")]
     ZpoolNotFound(String),

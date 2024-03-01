@@ -875,9 +875,10 @@ impl SledAgent {
     /// in-use).
     pub async fn omicron_physical_disks_ensure(
         &self,
-        request: OmicronPhysicalDisksConfig,
-    ) -> Result<OmicronPhysicalDisksConfig, Error> {
-        todo!();
+        config: OmicronPhysicalDisksConfig,
+    ) -> Result<(), Error> {
+        self.storage().omicron_physical_disks_ensure(config).await?;
+        Ok(())
     }
 
     /// List the Omicron zone configuration that's currently running

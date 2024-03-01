@@ -6,8 +6,8 @@
 
 use std::collections::HashSet;
 
-use crate::dataset::DatasetName;
-use crate::disk::{Disk, RawDisk};
+use crate::dataset::{DatasetName, CONFIG_DATASET};
+use crate::disk::{Disk, OmicronPhysicalDisksConfig, RawDisk};
 use crate::error::Error;
 use crate::resources::{AddDiskResult, ManagedDisk, StorageResources};
 use camino::Utf8PathBuf;
@@ -15,6 +15,7 @@ use illumos_utils::zfs::{Mountpoint, Zfs};
 use illumos_utils::zpool::ZpoolName;
 use key_manager::StorageKeyRequester;
 use omicron_common::disk::DiskIdentity;
+use omicron_common::ledger::Ledger;
 use sled_hardware::DiskVariant;
 use slog::{error, info, o, warn, Logger};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -50,6 +51,9 @@ use uuid::Uuid;
 // Here we start relatively small so that we can evaluate our choice over time.
 const QUEUE_SIZE: usize = 256;
 
+// The filename of the ledger storing physical disk info
+const DISKS_LEDGER_FILENAME: &str = "omicron-physical-disks.json";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageManagerState {
     WaitingForKeyManager,
@@ -64,13 +68,6 @@ struct NewFilesystemRequest {
     responder: oneshot::Sender<Result<(), Error>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ManageDiskRequest {
-    disk: DiskIdentity,
-    disk_id: Uuid,
-    pool_id: Uuid,
-}
-
 #[derive(Debug)]
 enum StorageRequest {
     // Requests to manage which devices the sled considers active.
@@ -79,13 +76,9 @@ enum StorageRequest {
     DetectedRawDiskRemoval(RawDisk),
     DisksChanged(HashSet<RawDisk>),
 
-    // Requests to explicitly manage or stop managing a device.
-    StartManaging {
-        request: ManageDiskRequest,
-        tx: oneshot::Sender<Result<(), Error>>,
-    },
-    StopManaging {
-        disk: DiskIdentity,
+    // Requests to explicitly manage or stop managing a set of devices
+    OmicronPhysicalDisksEnsure {
+        config: OmicronPhysicalDisksConfig,
         tx: oneshot::Sender<Result<(), Error>>,
     },
 
@@ -146,35 +139,16 @@ impl StorageHandle {
             .unwrap();
     }
 
-    pub async fn add_disk_to_control_plane(
+    pub async fn omicron_physical_disks_ensure(
         &self,
-        disk: DiskIdentity,
-        disk_id: Uuid,
-        pool_id: Uuid,
+        config: OmicronPhysicalDisksConfig,
     ) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(StorageRequest::StartManaging {
-                request: ManageDiskRequest {
-                    disk,
-                    disk_id,
-                    pool_id,
-                },
+            .send(StorageRequest::OmicronPhysicalDisksEnsure {
+                config,
                 tx
             })
-            .await
-            .unwrap();
-
-        rx.await.unwrap()
-    }
-
-    pub async fn remove_disk_from_control_plane(
-        &self,
-        disk: DiskIdentity,
-    ) -> Result<(), Error> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(StorageRequest::StopManaging { disk, tx })
             .await
             .unwrap();
 
@@ -402,14 +376,11 @@ impl StorageManager {
             StorageRequest::DisksChanged(raw_disks) => {
                 self.ensure_using_exactly_these_disks(raw_disks).await
             }
-            StorageRequest::StartManaging { request, tx } => {
-                let result = self.manage_u2_disk(request).await;
-                let inserted = result.as_ref().map(|r| r.disk_inserted()).unwrap_or(false);
-                let _ = tx.send(result.map(|_| ()));
-                inserted
-            }
-            StorageRequest::StopManaging { disk: _, tx: _ } => {
-                todo!()
+            StorageRequest::OmicronPhysicalDisksEnsure { config, tx } => {
+                // TODO: return value??
+                let result = self.omicron_physical_disks_ensure(config).await;
+                let _ = tx.send(result);
+                false
             }
             StorageRequest::NewFilesystem(request) => {
                 let result = self.add_dataset(&request).await;
@@ -442,6 +413,15 @@ impl StorageManager {
         Ok(())
     }
 
+    async fn all_omicron_disk_ledgers(&self) -> Vec<Utf8PathBuf> {
+        self.resources
+            .all_m2_mountpoints(CONFIG_DATASET)
+            .into_iter()
+            .map(|p| p.join(DISKS_LEDGER_FILENAME))
+            .collect()
+    }
+
+    // Loads persistent configuration about any Omicron-managed zones that we're
     // Manages a newly detected disk that has been attached to this sled.
     //
     // For U.2s: we update our inventory.
@@ -458,22 +438,10 @@ impl StorageManager {
     }
 
     // Makes an U.2 disk managed by the control plane within [`StorageResources`].
-    async fn manage_u2_disk(
+    async fn omicron_physical_disks_ensure(
         &mut self,
-        ManageDiskRequest {
-            disk: disk_identity,
-            disk_id,
-            pool_id,
-        }: ManageDiskRequest,
-    ) -> Result<AddDiskResult, Error> {
-        let raw_disk = match self.resources.get_disk(&disk_identity)? {
-            ManagedDisk::Managed { .. } => {
-                return Ok(AddDiskResult::DiskAlreadyInserted);
-            },
-            ManagedDisk::Unmanaged(raw) => raw,
-        };
-
-
+        config: OmicronPhysicalDisksConfig,
+    ) -> Result<(), Error> {
         // TODO: SCHEMA
         // - Add a schema-wrapped json representation of "all U.2s managed by
         // the control plane".
@@ -482,7 +450,7 @@ impl StorageManager {
         // TODO: LOADING SCHEMA
         // - Take advantage of the tokio select loop in this file to
         // "auto-manage" any disks that exist, and are in this ledger, before we
-        // boot. Would be cool to do this before any "manage_u2_disk" requests
+        // boot. Would be cool to do this before any "omicron_physical_disks_ensure" requests
         // could arrive and see changing state.
         //
         // TODO: UPDATING SCHEMA
@@ -491,37 +459,96 @@ impl StorageManager {
         // - It may actually make sense for this to contain "all physical disks
         // and their zpools" that are known within the control plane?
         //
-        // Something like:
-        //
-        // Request {
-        //    generation # from nexus,
-        //    vec of [ id: vendor/serial/model, uuid, pool id],
-        // }
-        //
-        // Then, similar to services: we keep trying to "make it so".
-        //
         // Can also expose an API for "managed disks" to make it clear what
         // we're up to. Would be cool to diff this with inventory via omdb.
 
+        let log = self.log.new(o!("request" => "omicron_physical_disks_ensure"));
+        // TODO: Need schema change test for this ledger.
+        let ledger_paths = self.all_omicron_disk_ledgers().await;
+        let maybe_ledger = Ledger::<OmicronPhysicalDisksConfig>::new(
+            &log,
+            ledger_paths.clone()
+        ).await;
 
+        let mut ledger = match maybe_ledger {
+            Some(ledger) => {
+                info!(log, "Comparing 'requested disks' to ledger on internal storage");
+                let ledger_data = ledger.data();
+                if config.generation < ledger_data.generation {
+                    warn!(log, "Request looks out-of-date compared to prior request");
+                    return Err(Error::PhysicalDiskConfigurationOutdated {
+                        requested: config.generation,
+                        current: ledger_data.generation,
+                    });
+                }
+                info!(log, "Request looks newer than prior requests");
+                ledger
+            }
+            None => {
+                info!(log, "No previously-stored 'requested disks', creating new ledger");
+                Ledger::<OmicronPhysicalDisksConfig>::new_with(
+                    &log,
+                    ledger_paths.clone(),
+                    OmicronPhysicalDisksConfig::new(),
+                )
+            }
+        };
+
+        self.omicron_physical_disks_ensure_internal(
+            &log,
+            &config,
+        ).await?;
+
+        let ledger_data = ledger.data_mut();
+        if *ledger_data == config {
+            return Ok(());
+        }
+        *ledger_data = config;
+        ledger.commit().await?;
+
+        Ok(())
+    }
+
+    // Conforms the state of usable storage to the requests in "config", but
+    // makes no attempts to manipulate the ledger storage.
+    //
+    // This means that "a new request arriving" can share code with "the storage
+    // manager autonomously loading the old requests from internal storage".
+    async fn omicron_physical_disks_ensure_internal(
+        &mut self,
+        log: &Logger,
+        config: &OmicronPhysicalDisksConfig,
+    ) -> Result<(), Error> {
         if self.state != StorageManagerState::Normal {
+            warn!(log, "Not ready to manage storage yet (waiting for the key manager)");
             return Err(Error::KeyManagerNotReady);
         }
 
-        match Disk::new(&self.log, raw_disk.clone(), Some(&self.key_requester))
-            .await
-        {
-            Ok(disk) => self.resources.insert_managed_disk(disk),
-            Err(err) => {
-                error!(
-                    self.log,
-                    "Persistent error";
-                    "err" => ?err,
-                    "disk_id" => ?raw_disk.identity()
-                );
-                Err(err.into())
-            }
+        for requested_disk in &config.disks {
+            let raw_disk = match self.resources.get_disk(&requested_disk.identity)? {
+                ManagedDisk::Managed { .. } => continue,
+                ManagedDisk::Unmanaged(raw) => raw,
+            };
+
+            match Disk::new(&log, raw_disk.clone(), Some(requested_disk.pool_id), Some(&self.key_requester))
+                .await
+            {
+                Ok(disk) => {
+                    self.resources.insert_managed_disk(disk)?;
+                },
+                Err(err) => {
+                    error!(
+                        log,
+                        "Failed to manage disk";
+                        "err" => ?err,
+                        "disk_id" => ?raw_disk.identity()
+                    );
+                    return Err(err.into());
+                }
+            };
         }
+
+        Ok(())
     }
 
     // Add a U.2 disk to [`StorageResources`] if new and return `Ok(true)` if
@@ -531,7 +558,7 @@ impl StorageManager {
         raw_disk: RawDisk,
     ) -> Result<AddDiskResult, Error> {
         let disk =
-            Disk::new(&self.log, raw_disk.clone(), Some(&self.key_requester))
+            Disk::new(&self.log, raw_disk.clone(), None, Some(&self.key_requester))
                 .await?;
         self.resources.insert_managed_disk(disk)
     }

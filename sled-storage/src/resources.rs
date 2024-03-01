@@ -5,7 +5,7 @@
 //! Discovered and usable disks and zpools
 
 use crate::dataset::M2_DEBUG_DATASET;
-use crate::disk::{Disk, RawDisk};
+use crate::disk::{Disk, OmicronPhysicalDiskConfig, RawDisk};
 use crate::error::Error;
 use crate::pool::Pool;
 use camino::Utf8PathBuf;
@@ -76,6 +76,13 @@ pub enum ManagedDisk {
 pub struct StorageResources {
     // All disks, real and synthetic, being managed by this sled
     disks: Arc<BTreeMap<DiskIdentity, ManagedDisk>>,
+
+    // The last set of disks the control plane explicitly told us to manage.
+    //
+    // Only includes external storage (U.2s).
+    //
+    // TODO: use this when new disks are detected, start including them
+    control_plane_disks: BTreeMap<DiskIdentity, OmicronPhysicalDiskConfig>,
 }
 
 impl StorageResources {

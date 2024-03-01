@@ -8,14 +8,59 @@ use camino::{Utf8Path, Utf8PathBuf};
 use derive_more::From;
 use illumos_utils::zpool::{Zpool, ZpoolKind, ZpoolName};
 use key_manager::StorageKeyRequester;
+use omicron_common::api::external::Generation;
 use omicron_common::disk::DiskIdentity;
+use omicron_common::ledger::Ledgerable;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sled_hardware::{
     DiskVariant, Partition, PooledDisk, PooledDiskError, UnparsedDisk,
 };
 use slog::Logger;
 use std::fs::File;
+use uuid::Uuid;
 
 use crate::dataset;
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
+pub struct OmicronPhysicalDiskConfig {
+    pub identity: DiskIdentity,
+    pub id: Uuid,
+    pub pool_id: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
+pub struct OmicronPhysicalDisksConfig {
+    /// generation number of this configuration
+    ///
+    /// This generation number is owned by the control plane (i.e., RSS or
+    /// Nexus, depending on whether RSS-to-Nexus handoff has happened).  It
+    /// should not be bumped within Sled Agent.
+    ///
+    /// Sled Agent rejects attempts to set the configuration to a generation
+    /// older than the one it's currently running.
+    pub generation: Generation,
+
+    pub disks: Vec<OmicronPhysicalDiskConfig>,
+}
+
+impl Ledgerable for OmicronPhysicalDisksConfig {
+    fn is_newer_than(&self, other: &OmicronPhysicalDisksConfig) -> bool {
+        self.generation > other.generation
+    }
+
+    // No need to do this, the generation number is provided externally.
+    fn generation_bump(&mut self) {}
+}
+
+impl OmicronPhysicalDisksConfig {
+    pub fn new() -> Self {
+        Self {
+            generation: Generation::new(),
+            disks: vec![],
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiskError {
@@ -138,10 +183,11 @@ impl Disk {
     pub async fn new(
         log: &Logger,
         raw_disk: RawDisk,
+        pool_id: Option<Uuid>,
         key_requester: Option<&StorageKeyRequester>,
     ) -> Result<Self, DiskError> {
         let disk = match raw_disk {
-            RawDisk::Real(disk) => PooledDisk::new(log, disk)?.into(),
+            RawDisk::Real(disk) => PooledDisk::new(log, disk, pool_id)?.into(),
             RawDisk::Synthetic(disk) => Disk::Synthetic(disk),
         };
         dataset::ensure_zpool_has_datasets(

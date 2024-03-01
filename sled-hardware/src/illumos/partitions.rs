@@ -79,8 +79,9 @@ pub fn ensure_partition_layout(
     log: &Logger,
     paths: &DiskPaths,
     variant: DiskVariant,
+    zpool_id: Option<Uuid>,
 ) -> Result<Vec<Partition>, PooledDiskError> {
-    internal_ensure_partition_layout::<libefi_illumos::Gpt>(log, paths, variant)
+    internal_ensure_partition_layout::<libefi_illumos::Gpt>(log, paths, variant, zpool_id)
 }
 
 // Same as the [ensure_partition_layout], but with generic parameters
@@ -89,23 +90,25 @@ fn internal_ensure_partition_layout<GPT: gpt::LibEfiGpt>(
     log: &Logger,
     paths: &DiskPaths,
     variant: DiskVariant,
+    zpool_id: Option<Uuid>,
 ) -> Result<Vec<Partition>, PooledDiskError> {
     // Open the "Whole Disk" as a raw device to be parsed by the
     // libefi-illumos library. This lets us peek at the GPT before
     // making too many assumptions about it.
     let raw = true;
     let path = paths.whole_disk(raw);
+    let log = log.new(o!("path" => paths.devfs_path));
 
     let gpt = match GPT::read(&path) {
         Ok(gpt) => {
             // This should be the common steady-state case
-            info!(log, "Disk at {} already has a GPT", paths.devfs_path);
+            info!(log, "Disk already has a GPT");
             gpt
         }
         Err(libefi_illumos::Error::LabelNotFound) => {
             // Fresh U.2 disks are an example of devices where "we don't expect
             // a GPT to exist".
-            info!(log, "Disk at {} does not have a GPT", paths.devfs_path);
+            info!(log, "Disk does not have a GPT");
 
             // For ZFS-implementation-specific reasons, Zpool create can only
             // act on devices under the "/dev" hierarchy, rather than the device
@@ -119,9 +122,17 @@ fn internal_ensure_partition_layout<GPT: gpt::LibEfiGpt>(
             };
             match variant {
                 DiskVariant::U2 => {
-                    info!(log, "Formatting zpool on disk {}", paths.devfs_path);
+                    info!(
+                        log,
+                        "Formatting zpool on disk";
+                        "uuid" => zpool_id,
+                    );
+                    let Some(zpool_id) = zpool_id else {
+                        return Err(PooledDiskError::MissingZpoolUuid);
+                    }
+
                     // If a zpool does not already exist, create one.
-                    let zpool_name = ZpoolName::new_external(Uuid::new_v4());
+                    let zpool_name = ZpoolName::new_external(zpool_id);
                     Zpool::create(&zpool_name, dev_path)?;
                     return Ok(vec![Partition::ZfsPool]);
                 }

@@ -49,7 +49,7 @@ impl Hardware {
                     );
                 }
                 DiskVariant::M2 => {
-                    let disk = Disk::new(log, disk, None)
+                    let disk = Disk::new(log, disk, None, None)
                         .await
                         .context("failed to instantiate Disk handle for M.2")?;
                     m2_disks.push(disk);
