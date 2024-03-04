@@ -131,13 +131,9 @@ fn spawn_storage_manager(
     handle
 }
 
-fn spawn_storage_monitor(
-    log: &Logger,
-    storage_handle: StorageHandle,
-) {
+fn spawn_storage_monitor(log: &Logger, storage_handle: StorageHandle) {
     info!(log, "Starting StorageMonitor");
-    let storage_monitor =
-        StorageMonitor::new(log, storage_handle);
+    let storage_monitor = StorageMonitor::new(log, storage_handle);
     tokio::spawn(async move {
         storage_monitor.run().await;
     });
@@ -184,9 +180,9 @@ async fn spawn_bootstore_tasks(
     hardware_manager: &HardwareManager,
     global_zone_bootstrap_ip: Ipv6Addr,
 ) -> bootstore::NodeHandle {
-    let storage_resources = storage_handle.get_latest_resources().await;
+    let iter_all = storage_handle.get_latest_resources().await;
     let config = new_bootstore_config(
-        &storage_resources,
+        &iter_all,
         hardware_manager.baseboard(),
         global_zone_bootstrap_ip,
     )

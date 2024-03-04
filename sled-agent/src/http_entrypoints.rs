@@ -40,6 +40,7 @@ use oximeter_producer::ProducerIdPathParams;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sled_hardware::DiskVariant;
+use sled_storage::resources::DisksManagementResult;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -347,11 +348,11 @@ async fn omicron_zones_get(
 async fn omicron_physical_disks_put(
     rqctx: RequestContext<SledAgent>,
     body: TypedBody<OmicronPhysicalDisksConfig>,
-) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+) -> Result<HttpResponseOk<DisksManagementResult>, HttpError> {
     let sa = rqctx.context();
     let body_args = body.into_inner();
-    sa.omicron_physical_disks_ensure(body_args).await?;
-    Ok(HttpResponseUpdatedNoContent())
+    let result = sa.omicron_physical_disks_ensure(body_args).await?;
+    Ok(HttpResponseOk(result))
 }
 
 #[endpoint {
@@ -865,7 +866,7 @@ async fn host_os_write_start(
 
     // Find our corresponding disk.
     let maybe_disk_path =
-        sa.storage().get_latest_resources().await.managed_disks().find_map(
+        sa.storage().get_latest_resources().await.iter_managed().find_map(
             |(_identity, disk)| {
                 // Synthetic disks panic if asked for their `slot()`, so filter
                 // them out first; additionally, filter out any non-M2 disks.

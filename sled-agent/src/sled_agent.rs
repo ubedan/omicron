@@ -62,6 +62,7 @@ use omicron_common::backoff::{
 use oximeter::types::ProducerRegistry;
 use sled_hardware::{underlay, Baseboard, HardwareManager};
 use sled_storage::manager::StorageHandle;
+use sled_storage::resources::DisksManagementResult;
 use slog::Logger;
 use std::collections::BTreeMap;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
@@ -876,9 +877,8 @@ impl SledAgent {
     pub async fn omicron_physical_disks_ensure(
         &self,
         config: OmicronPhysicalDisksConfig,
-    ) -> Result<(), Error> {
-        self.storage().omicron_physical_disks_ensure(config).await?;
-        Ok(())
+    ) -> Result<DisksManagementResult, Error> {
+        Ok(self.storage().omicron_physical_disks_ensure(config).await?)
     }
 
     /// List the Omicron zone configuration that's currently running
@@ -1182,7 +1182,7 @@ impl SledAgent {
             .storage()
             .get_latest_resources()
             .await
-            .all_disks()
+            .iter_all()
             .map(|(identity, variant)| crate::params::InventoryDisk {
                 identity: identity.clone(),
                 variant,

@@ -7,9 +7,9 @@
 use std::collections::HashSet;
 
 use crate::dataset::{DatasetName, CONFIG_DATASET};
-use crate::disk::{Disk, OmicronPhysicalDisksConfig, RawDisk};
+use crate::disk::{OmicronPhysicalDisksConfig, RawDisk};
 use crate::error::Error;
-use crate::resources::{AddDiskResult, ManagedDisk, StorageResources};
+use crate::resources::{AllDisks, DisksManagementResult, StorageResources};
 use camino::Utf8PathBuf;
 use illumos_utils::zfs::{Mountpoint, Zfs};
 use illumos_utils::zpool::ZpoolName;
@@ -17,7 +17,7 @@ use key_manager::StorageKeyRequester;
 use omicron_common::disk::DiskIdentity;
 use omicron_common::ledger::Ledger;
 use sled_hardware::DiskVariant;
-use slog::{error, info, o, warn, Logger};
+use slog::{info, o, warn, Logger};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{interval, Duration, MissedTickBehavior};
 use uuid::Uuid;
@@ -56,9 +56,26 @@ const DISKS_LEDGER_FILENAME: &str = "omicron-physical-disks.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageManagerState {
+    // We know that any attempts to manage disks will fail, as the key manager
+    // is not ready yet.
     WaitingForKeyManager,
-    QueueingDisks,
-    Normal,
+
+    // This state is used to indicate that the set of "control plane" physical
+    // disks and the set of "observed" disks may be out-of-sync.
+    //
+    // This can happen when:
+    // 1. The sled boots, and the ledger of "control plane disks" is initially
+    //    loaded.
+    // 2. A U.2 is added to the disk after initial boot.
+    //
+    // In both of these cases, if trust quorum hasn't been established, it's
+    // possible that the request to [Self::manage_disks] will need to retry.
+    SynchronizationNeeded,
+
+    // This state indicates the key manager is ready, and the manager
+    // believes that the set of control plane disks is in-sync with the set of
+    // observed disks.
+    Synchronized,
 }
 
 #[derive(Debug)]
@@ -79,7 +96,7 @@ enum StorageRequest {
     // Requests to explicitly manage or stop managing a set of devices
     OmicronPhysicalDisksEnsure {
         config: OmicronPhysicalDisksConfig,
-        tx: oneshot::Sender<Result<(), Error>>,
+        tx: oneshot::Sender<Result<DisksManagementResult, Error>>,
     },
 
     // Requests the creation of a new dataset within a managed disk.
@@ -90,7 +107,7 @@ enum StorageRequest {
     /// This will always grab the latest state after any new updates, as it
     /// serializes through the `StorageManager` task after all prior requests.
     /// This serialization is particularly useful for tests.
-    GetLatestResources(oneshot::Sender<StorageResources>),
+    GetLatestResources(oneshot::Sender<AllDisks>),
 
     /// Get the internal task state of the manager
     GetManagerState(oneshot::Sender<StorageManagerData>),
@@ -107,7 +124,7 @@ pub struct StorageManagerData {
 #[derive(Clone)]
 pub struct StorageHandle {
     tx: mpsc::Sender<StorageRequest>,
-    resource_updates: watch::Receiver<StorageResources>,
+    disk_updates: watch::Receiver<AllDisks>,
 }
 
 impl StorageHandle {
@@ -119,7 +136,10 @@ impl StorageHandle {
     /// Removes a disk, if it's tracked by the storage manager, as well
     /// as any associated zpools.
     pub async fn detected_raw_disk_removal(&self, disk: RawDisk) {
-        self.tx.send(StorageRequest::DetectedRawDiskRemoval(disk)).await.unwrap();
+        self.tx
+            .send(StorageRequest::DetectedRawDiskRemoval(disk))
+            .await
+            .unwrap();
     }
 
     /// Ensures that the storage manager tracks exactly the provided disks.
@@ -142,13 +162,10 @@ impl StorageHandle {
     pub async fn omicron_physical_disks_ensure(
         &self,
         config: OmicronPhysicalDisksConfig,
-    ) -> Result<(), Error> {
+    ) -> Result<DisksManagementResult, Error> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(StorageRequest::OmicronPhysicalDisksEnsure {
-                config,
-                tx
-            })
+            .send(StorageRequest::OmicronPhysicalDisksEnsure { config, tx })
             .await
             .unwrap();
 
@@ -171,26 +188,26 @@ impl StorageHandle {
     /// Wait for a boot disk to be initialized
     pub async fn wait_for_boot_disk(&mut self) -> (DiskIdentity, ZpoolName) {
         loop {
-            let resources = self.resource_updates.borrow_and_update();
+            let resources = self.disk_updates.borrow_and_update();
             if let Some((disk_id, zpool_name)) = resources.boot_disk() {
                 return (disk_id, zpool_name);
             }
             drop(resources);
             // We panic if the sender is dropped, as this means
             // the StorageManager has gone away, which it should not do.
-            self.resource_updates.changed().await.unwrap();
+            self.disk_updates.changed().await.unwrap();
         }
     }
 
     /// Wait for any storage resource changes
-    pub async fn wait_for_changes(&mut self) -> StorageResources {
-        self.resource_updates.changed().await.unwrap();
-        self.resource_updates.borrow_and_update().clone()
+    pub async fn wait_for_changes(&mut self) -> AllDisks {
+        self.disk_updates.changed().await.unwrap();
+        self.disk_updates.borrow_and_update().clone()
     }
 
-    /// Retrieve the latest value of `StorageResources` from the
+    /// Retrieve the latest value of `AllDisks` from the
     /// `StorageManager` task.
-    pub async fn get_latest_resources(&self) -> StorageResources {
+    pub async fn get_latest_resources(&self) -> AllDisks {
         let (tx, rx) = oneshot::channel();
         self.tx.send(StorageRequest::GetLatestResources(tx)).await.unwrap();
         rx.await.unwrap()
@@ -223,19 +240,23 @@ impl StorageHandle {
 #[cfg(feature = "testing")]
 pub struct FakeStorageManager {
     rx: mpsc::Receiver<StorageRequest>,
+    _key_manager: key_manager::KeyManager<HardcodedSecretRetriever>,
     resources: StorageResources,
-    resource_updates: watch::Sender<StorageResources>,
 }
 
 #[cfg(feature = "testing")]
 impl FakeStorageManager {
-    pub fn new() -> (Self, StorageHandle) {
+    pub fn new(log: &Logger) -> (Self, StorageHandle) {
         let (tx, rx) = mpsc::channel(QUEUE_SIZE);
-        let resources = StorageResources::default();
-        let (update_tx, update_rx) = watch::channel(resources.clone());
+        let (_key_manager, key_requester) = key_manager::KeyManager::new(
+            &log,
+            HardcodedSecretRetriever::default(),
+        );
+        let resources = StorageResources::new(log, key_requester);
+        let disk_updates = resources.watch_disks();
         (
-            Self { rx, resources, resource_updates: update_tx },
-            StorageHandle { tx, resource_updates: update_rx },
+            Self { rx, _key_manager, resources },
+            StorageHandle { tx, disk_updates },
         )
     }
 
@@ -246,13 +267,10 @@ impl FakeStorageManager {
         loop {
             match self.rx.recv().await {
                 Some(StorageRequest::DetectedRawDisk(raw_disk)) => {
-                    if self.detected_disk(raw_disk).disk_inserted() {
-                        self.resource_updates
-                            .send_replace(self.resources.clone());
-                    }
+                    self.detected_disk(raw_disk);
                 }
                 Some(StorageRequest::GetLatestResources(tx)) => {
-                    let _ = tx.send(self.resources.clone());
+                    let _ = tx.send(self.resources.disks().clone());
                 }
                 Some(_) => {
                     unreachable!();
@@ -263,7 +281,7 @@ impl FakeStorageManager {
     }
 
     // Add a disk to `StorageResources` if it is new and return true if so
-    fn detected_disk(&mut self, raw_disk: RawDisk) -> AddDiskResult {
+    fn detected_disk(&mut self, raw_disk: RawDisk) {
         let disk = match raw_disk {
             RawDisk::Real(_) => {
                 panic!(
@@ -271,10 +289,10 @@ impl FakeStorageManager {
                 );
             }
             RawDisk::Synthetic(synthetic_disk) => {
-                Disk::Synthetic(synthetic_disk)
+                crate::disk::Disk::Synthetic(synthetic_disk)
             }
         };
-        self.resources.insert_fake_disk(disk)
+        self.resources.insert_fake_disk(disk);
     }
 }
 
@@ -284,13 +302,8 @@ impl FakeStorageManager {
 pub struct StorageManager {
     log: Logger,
     state: StorageManagerState,
-    // Used to find the capacity of the channel for tracking purposes
-    tx: mpsc::Sender<StorageRequest>,
     rx: mpsc::Receiver<StorageRequest>,
     resources: StorageResources,
-    key_requester: StorageKeyRequester,
-    resource_updates: watch::Sender<StorageResources>,
-    last_logged_capacity: usize,
 }
 
 impl StorageManager {
@@ -299,20 +312,16 @@ impl StorageManager {
         key_requester: StorageKeyRequester,
     ) -> (StorageManager, StorageHandle) {
         let (tx, rx) = mpsc::channel(QUEUE_SIZE);
-        let resources = StorageResources::default();
-        let (update_tx, update_rx) = watch::channel(resources.clone());
+        let resources = StorageResources::new(log, key_requester);
+        let disk_updates = resources.watch_disks();
         (
             StorageManager {
                 log: log.new(o!("component" => "StorageManager")),
                 state: StorageManagerState::WaitingForKeyManager,
-                tx: tx.clone(),
                 rx,
                 resources,
-                key_requester,
-                resource_updates: update_tx,
-                last_logged_capacity: QUEUE_SIZE,
             },
-            StorageHandle { tx, resource_updates: update_rx },
+            StorageHandle { tx, disk_updates },
         )
     }
 
@@ -330,6 +339,11 @@ impl StorageManager {
                         warn!(self.log, "{e}");
                     }
                 }
+                _ = interval.tick(),
+                    if self.state == StorageManagerState::SynchronizationNeeded =>
+                {
+                    self.manage_disks().await;
+                }
             }
         }
     }
@@ -338,149 +352,187 @@ impl StorageManager {
     ///
     /// This is useful for testing/debugging
     pub async fn step(&mut self) -> Result<(), Error> {
-        const CAPACITY_LOG_THRESHOLD: usize = 10;
-        // We check the capacity and log it every time it changes by at least 10
-        // entries in either direction.
-        let current = self.tx.capacity();
-        if self.last_logged_capacity.saturating_sub(current)
-            >= CAPACITY_LOG_THRESHOLD
-        {
-            info!(
-                self.log,
-                "Channel capacity decreased";
-                "previous" => ?self.last_logged_capacity,
-                "current" => ?current
-            );
-            self.last_logged_capacity = current;
-        } else if current.saturating_sub(self.last_logged_capacity)
-            >= CAPACITY_LOG_THRESHOLD
-        {
-            info!(
-                self.log,
-                "Channel capacity increased";
-                "previous" => ?self.last_logged_capacity,
-                "current" => ?current
-            );
-            self.last_logged_capacity = current;
-        }
         // The sending side never disappears because we hold a copy
         let req = self.rx.recv().await.unwrap();
         info!(self.log, "Received {:?}", req);
-        let should_send_updates = match req {
+
+        match req {
             StorageRequest::DetectedRawDisk(raw_disk) => {
-                self.detected_disk(raw_disk).await?.disk_inserted()
+                self.detected_disk(raw_disk).await?;
             }
             StorageRequest::DetectedRawDiskRemoval(raw_disk) => {
-                self.detected_disk_removal(raw_disk)
+                self.detected_disk_removal(raw_disk);
             }
             StorageRequest::DisksChanged(raw_disks) => {
-                self.ensure_using_exactly_these_disks(raw_disks).await
+                self.ensure_using_exactly_these_disks(raw_disks).await;
             }
             StorageRequest::OmicronPhysicalDisksEnsure { config, tx } => {
-                // TODO: return value??
-                let result = self.omicron_physical_disks_ensure(config).await;
-                let _ = tx.send(result);
-                false
+                let _ =
+                    tx.send(self.omicron_physical_disks_ensure(config).await);
             }
             StorageRequest::NewFilesystem(request) => {
                 let result = self.add_dataset(&request).await;
-                if result.is_err() {
-                    warn!(self.log, "{result:?}");
+                if let Err(ref err) = &result {
+                    warn!(self.log, "Failed to add dataset"; "err" => ?err);
                 }
                 let _ = request.responder.send(result);
-                false
             }
             StorageRequest::KeyManagerReady => {
-                self.state = StorageManagerState::Normal;
-                false
+                self.set_key_manager_ready().await?;
             }
             StorageRequest::GetLatestResources(tx) => {
-                let _ = tx.send(self.resources.clone());
-                false
+                let _ = tx.send(self.resources.disks().clone());
             }
             StorageRequest::GetManagerState(tx) => {
-                let _ = tx.send(StorageManagerData {
-                    state: self.state,
-                });
-                false
+                let _ = tx.send(StorageManagerData { state: self.state });
             }
         };
-
-        if should_send_updates {
-            let _ = self.resource_updates.send_replace(self.resources.clone());
-        }
 
         Ok(())
     }
 
+    async fn manage_disks(&mut self) {
+        let result = self.resources.synchronize_disk_management().await;
+
+        if result.has_retryable_error() {
+            // This is logged as "info", not "warn", as it can happen before
+            // trust quorum has been established.
+            info!(
+                self.log,
+                "Failed to synchronize disks, but will retry";
+                "result" => ?result,
+            );
+            return;
+        }
+
+        self.state = StorageManagerState::Synchronized;
+
+        if result.has_error() {
+            warn!(
+                self.log,
+                "Failed to synchronize disks due to permanant error";
+                "result" => #?result,
+            );
+            return;
+        }
+
+        info!(
+            self.log,
+            "Successfully synchronized disks without error";
+            "result" => ?result,
+        );
+    }
+
     async fn all_omicron_disk_ledgers(&self) -> Vec<Utf8PathBuf> {
         self.resources
+            .disks()
             .all_m2_mountpoints(CONFIG_DATASET)
             .into_iter()
             .map(|p| p.join(DISKS_LEDGER_FILENAME))
             .collect()
     }
 
-    // Loads persistent configuration about any Omicron-managed zones that we're
     // Manages a newly detected disk that has been attached to this sled.
     //
     // For U.2s: we update our inventory.
     // For M.2s: we do the same, but also begin "managing" the disk so
     // it can automatically be in-use.
-    async fn detected_disk(
-        &mut self,
-        raw_disk: RawDisk,
-    ) -> Result<AddDiskResult, Error> {
-        match raw_disk.variant() {
-            DiskVariant::U2 => self.resources.insert_raw_disk(raw_disk),
-            DiskVariant::M2 => self.add_m2_disk(raw_disk).await,
+    async fn detected_disk(&mut self, raw_disk: RawDisk) -> Result<(), Error> {
+        let needs_synchronization =
+            matches!(raw_disk.variant(), DiskVariant::U2);
+        self.resources.insert_disk(raw_disk).await?;
+
+        if needs_synchronization
+            && self.state != StorageManagerState::WaitingForKeyManager
+        {
+            self.state = StorageManagerState::SynchronizationNeeded;
         }
+        Ok(())
+    }
+
+    async fn load_ledger(&self) -> Option<Ledger<OmicronPhysicalDisksConfig>> {
+        let ledger_paths = self.all_omicron_disk_ledgers().await;
+        let log = self.log.new(o!("request" => "load_ledger"));
+        let maybe_ledger = Ledger::<OmicronPhysicalDisksConfig>::new(
+            &log,
+            ledger_paths.clone(),
+        )
+        .await;
+
+        match maybe_ledger {
+            Some(ledger) => {
+                info!(self.log, "Ledger of physical disks exists");
+                return Some(ledger);
+            }
+            None => {
+                info!(self.log, "No ledger of physical disks exists");
+                return None;
+            }
+        }
+    }
+
+    async fn set_key_manager_ready(&mut self) -> Result<(), Error> {
+        // Now that we're actually able to unpack U.2s, attempt to load the
+        // set of disks which we previously stored in the ledger, if one
+        // existed.
+        let ledger = self.load_ledger().await;
+        if let Some(ledger) = ledger {
+            info!(self.log, "Setting StorageResources state to match ledger");
+
+            // Identify which disks should be managed by the control
+            // plane, and adopt all requested disks into the control plane
+            // in a background task (see: [Self::manage_disks]).
+            self.resources.set_config(&ledger.data().disks).await;
+            self.state = StorageManagerState::SynchronizationNeeded;
+        } else {
+            self.state = StorageManagerState::Synchronized;
+        }
+
+        Ok(())
     }
 
     // Makes an U.2 disk managed by the control plane within [`StorageResources`].
     async fn omicron_physical_disks_ensure(
         &mut self,
-        config: OmicronPhysicalDisksConfig,
-    ) -> Result<(), Error> {
-        // TODO: SCHEMA
-        // - Add a schema-wrapped json representation of "all U.2s managed by
-        // the control plane".
-        // - Perhaps go hit up the ledger?
-        //
-        // TODO: LOADING SCHEMA
-        // - Take advantage of the tokio select loop in this file to
-        // "auto-manage" any disks that exist, and are in this ledger, before we
-        // boot. Would be cool to do this before any "omicron_physical_disks_ensure" requests
-        // could arrive and see changing state.
-        //
-        // TODO: UPDATING SCHEMA
-        // - Whenever we get a request from Nexus (... or RSS?) update the set
-        // of physical disks which we're trying to manage.
-        // - It may actually make sense for this to contain "all physical disks
-        // and their zpools" that are known within the control plane?
-        //
-        // Can also expose an API for "managed disks" to make it clear what
-        // we're up to. Would be cool to diff this with inventory via omdb.
+        mut config: OmicronPhysicalDisksConfig,
+    ) -> Result<DisksManagementResult, Error> {
+        let log =
+            self.log.new(o!("request" => "omicron_physical_disks_ensure"));
 
-        let log = self.log.new(o!("request" => "omicron_physical_disks_ensure"));
+        // Ensure that the set of disks arrives in a consistent order.
+        config
+            .disks
+            .sort_by(|a, b| a.identity.partial_cmp(&b.identity).unwrap());
+
         // TODO: Need schema change test for this ledger.
         let ledger_paths = self.all_omicron_disk_ledgers().await;
         let maybe_ledger = Ledger::<OmicronPhysicalDisksConfig>::new(
             &log,
-            ledger_paths.clone()
-        ).await;
+            ledger_paths.clone(),
+        )
+        .await;
 
         let mut ledger = match maybe_ledger {
             Some(ledger) => {
-                info!(log, "Comparing 'requested disks' to ledger on internal storage");
+                info!(
+                    log,
+                    "Comparing 'requested disks' to ledger on internal storage"
+                );
                 let ledger_data = ledger.data();
                 if config.generation < ledger_data.generation {
-                    warn!(log, "Request looks out-of-date compared to prior request");
+                    warn!(
+                        log,
+                        "Request looks out-of-date compared to prior request"
+                    );
                     return Err(Error::PhysicalDiskConfigurationOutdated {
                         requested: config.generation,
                         current: ledger_data.generation,
                     });
                 }
+
+                // TODO: If the generation is equal, check that the values are
+                // also equal.
+
                 info!(log, "Request looks newer than prior requests");
                 ledger
             }
@@ -494,78 +546,49 @@ impl StorageManager {
             }
         };
 
-        self.omicron_physical_disks_ensure_internal(
-            &log,
-            &config,
-        ).await?;
+        let result =
+            self.omicron_physical_disks_ensure_internal(&log, &config).await?;
 
         let ledger_data = ledger.data_mut();
         if *ledger_data == config {
-            return Ok(());
+            return Ok(result);
         }
         *ledger_data = config;
         ledger.commit().await?;
 
-        Ok(())
+        Ok(result)
     }
 
-    // Conforms the state of usable storage to the requests in "config", but
-    // makes no attempts to manipulate the ledger storage.
+    // Updates [StorageResources] to manage the disks requsted by `config`, if
+    // those disks exist.
     //
-    // This means that "a new request arriving" can share code with "the storage
-    // manager autonomously loading the old requests from internal storage".
+    // Makes no attempts to manipulate the ledger storage.
     async fn omicron_physical_disks_ensure_internal(
         &mut self,
         log: &Logger,
         config: &OmicronPhysicalDisksConfig,
-    ) -> Result<(), Error> {
-        if self.state != StorageManagerState::Normal {
-            warn!(log, "Not ready to manage storage yet (waiting for the key manager)");
+    ) -> Result<DisksManagementResult, Error> {
+        if self.state != StorageManagerState::Synchronized {
+            warn!(
+                log,
+                "Not ready to manage storage yet (waiting for the key manager)"
+            );
             return Err(Error::KeyManagerNotReady);
         }
 
-        for requested_disk in &config.disks {
-            let raw_disk = match self.resources.get_disk(&requested_disk.identity)? {
-                ManagedDisk::Managed { .. } => continue,
-                ManagedDisk::Unmanaged(raw) => raw,
-            };
+        // Identify which disks should be managed by the control
+        // plane, and adopt all requested disks into the control plane.
+        self.resources.set_config(&config.disks).await;
 
-            match Disk::new(&log, raw_disk.clone(), Some(requested_disk.pool_id), Some(&self.key_requester))
-                .await
-            {
-                Ok(disk) => {
-                    self.resources.insert_managed_disk(disk)?;
-                },
-                Err(err) => {
-                    error!(
-                        log,
-                        "Failed to manage disk";
-                        "err" => ?err,
-                        "disk_id" => ?raw_disk.identity()
-                    );
-                    return Err(err.into());
-                }
-            };
-        }
-
-        Ok(())
-    }
-
-    // Add a U.2 disk to [`StorageResources`] if new and return `Ok(true)` if
-    // so.
-    async fn add_m2_disk(
-        &mut self,
-        raw_disk: RawDisk,
-    ) -> Result<AddDiskResult, Error> {
-        let disk =
-            Disk::new(&self.log, raw_disk.clone(), None, Some(&self.key_requester))
-                .await?;
-        self.resources.insert_managed_disk(disk)
+        // Actually try to "manage" those disks, which may involve formatting
+        // zpools and conforming partitions to those expected by the control
+        // plane.
+        Ok(self.resources.synchronize_disk_management().await)
     }
 
     // Delete a real disk and return `true` if the disk was actually removed
-    fn detected_disk_removal(&mut self, raw_disk: RawDisk) -> bool {
-        self.resources.remove_disk(raw_disk.identity())
+    fn detected_disk_removal(&mut self, raw_disk: RawDisk) {
+        self.resources.remove_disk(raw_disk.identity());
     }
 
     // Find all disks to remove that are not in raw_disks and remove them. Then
@@ -575,16 +598,15 @@ impl StorageManager {
     async fn ensure_using_exactly_these_disks(
         &mut self,
         raw_disks: HashSet<RawDisk>,
-    ) -> bool {
-        let mut should_update = false;
-
+    ) {
         let all_ids: HashSet<_> =
             raw_disks.iter().map(|d| d.identity()).collect();
 
         // Find all existing disks not in the current set
         let to_remove: Vec<DiskIdentity> = self
             .resources
-            .all_disks()
+            .disks()
+            .iter_all()
             .filter_map(|(id, _variant)| {
                 if !all_ids.contains(id) {
                     Some(id.clone())
@@ -595,27 +617,19 @@ impl StorageManager {
             .collect();
 
         for id in to_remove {
-            if self.resources.remove_disk(&id) {
-                should_update = true;
-            }
+            self.resources.remove_disk(&id);
         }
 
         for raw_disk in raw_disks {
             let disk_id = raw_disk.identity().clone();
-            match self.detected_disk(raw_disk).await {
-                Ok(AddDiskResult::DiskInserted) => should_update = true,
-                Ok(_) => (),
-                Err(err) => {
-                    warn!(
-                        self.log,
-                        "Failed to add disk to storage resources: {err}";
-                        "disk_id" => ?disk_id
-                    );
-                }
+            if let Err(err) = self.detected_disk(raw_disk).await {
+                warn!(
+                    self.log,
+                    "Failed to add disk to storage resources: {err}";
+                    "disk_id" => ?disk_id
+                );
             }
         }
-
-        should_update
     }
 
     // Attempts to add a dataset within a zpool, according to `request`.
@@ -626,7 +640,8 @@ impl StorageManager {
         info!(self.log, "add_dataset: {:?}", request);
         if !self
             .resources
-            .managed_disks()
+            .disks()
+            .iter_managed()
             .any(|(_, disk)| disk.zpool_name() == request.dataset_name.pool())
         {
             return Err(Error::ZpoolNotFound(format!(
@@ -672,6 +687,52 @@ impl StorageManager {
     }
 }
 
+/// A [`key-manager::SecretRetriever`] that only returns hardcoded IKM for
+/// epoch 0
+#[cfg(feature = "testing")]
+#[derive(Debug, Default)]
+struct HardcodedSecretRetriever {
+    inject_error: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "testing")]
+#[async_trait::async_trait]
+impl key_manager::SecretRetriever for HardcodedSecretRetriever {
+    async fn get_latest(
+        &self,
+    ) -> Result<key_manager::VersionedIkm, key_manager::SecretRetrieverError>
+    {
+        if self.inject_error.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(key_manager::SecretRetrieverError::Bootstore(
+                "Timeout".to_string(),
+            ));
+        }
+
+        let epoch = 0;
+        let salt = [0u8; 32];
+        let secret = [0x1d; 32];
+
+        Ok(key_manager::VersionedIkm::new(epoch, salt, &secret))
+    }
+
+    /// We don't plan to do any key rotation before trust quorum is ready
+    async fn get(
+        &self,
+        epoch: u64,
+    ) -> Result<key_manager::SecretState, key_manager::SecretRetrieverError>
+    {
+        if self.inject_error.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(key_manager::SecretRetrieverError::Bootstore(
+                "Timeout".to_string(),
+            ));
+        }
+        if epoch != 0 {
+            return Err(key_manager::SecretRetrieverError::NoSuchEpoch(epoch));
+        }
+        Ok(key_manager::SecretState::Current(self.get_latest().await?))
+    }
+}
+
 /// All tests only use synthetic disks, but are expected to be run on illumos
 /// systems.
 #[cfg(all(test, target_os = "illumos"))]
@@ -694,48 +755,6 @@ mod tests {
     };
     use uuid::Uuid;
 
-    /// A [`key-manager::SecretRetriever`] that only returns hardcoded IKM for
-    /// epoch 0
-    #[derive(Debug, Default)]
-    struct HardcodedSecretRetriever {
-        inject_error: Arc<AtomicBool>,
-    }
-
-    #[async_trait]
-    impl SecretRetriever for HardcodedSecretRetriever {
-        async fn get_latest(
-            &self,
-        ) -> Result<VersionedIkm, SecretRetrieverError> {
-            if self.inject_error.load(Ordering::SeqCst) {
-                return Err(SecretRetrieverError::Bootstore(
-                    "Timeout".to_string(),
-                ));
-            }
-
-            let epoch = 0;
-            let salt = [0u8; 32];
-            let secret = [0x1d; 32];
-
-            Ok(VersionedIkm::new(epoch, salt, &secret))
-        }
-
-        /// We don't plan to do any key rotation before trust quorum is ready
-        async fn get(
-            &self,
-            epoch: u64,
-        ) -> Result<SecretState, SecretRetrieverError> {
-            if self.inject_error.load(Ordering::SeqCst) {
-                return Err(SecretRetrieverError::Bootstore(
-                    "Timeout".to_string(),
-                ));
-            }
-            if epoch != 0 {
-                return Err(SecretRetrieverError::NoSuchEpoch(epoch));
-            }
-            Ok(SecretState::Current(self.get_latest().await?))
-        }
-    }
-
     #[tokio::test]
     async fn add_u2_disk_while_not_in_normal_stage_and_ensure_it_gets_queued() {
         illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
@@ -750,14 +769,20 @@ mod tests {
         assert_eq!(StorageManagerState::WaitingForKeyManager, manager.state);
         manager.add_u2_disk(raw_disk.clone()).await.unwrap();
         assert!(manager.resources.all_u2_zpools().is_empty());
-        assert_eq!(manager.queued_manage_disk_requests, HashSet::from([raw_disk.clone()]));
+        assert_eq!(
+            manager.queued_manage_disk_requests,
+            HashSet::from([raw_disk.clone()])
+        );
 
         // Check other non-normal stages and ensure disk gets queued
         manager.queued_manage_disk_requests.clear();
-        manager.state = StorageManagerState::QueueingDisks;
+        manager.state = StorageManagerState::SynchronizationNeeded;
         manager.add_u2_disk(raw_disk.clone()).await.unwrap();
         assert!(manager.resources.all_u2_zpools().is_empty());
-        assert_eq!(manager.queued_manage_disk_requests, HashSet::from([raw_disk]));
+        assert_eq!(
+            manager.queued_manage_disk_requests,
+            HashSet::from([raw_disk])
+        );
         logctx.cleanup_successful();
     }
 
@@ -776,7 +801,7 @@ mod tests {
         tokio::spawn(async move { key_manager.run().await });
 
         // Set the stage to pretend we've progressed enough to have a key_manager available.
-        manager.state = StorageManagerState::Normal;
+        manager.state = StorageManagerState::Synchronized;
         manager.add_u2_disk(disk).await.unwrap();
         assert_eq!(manager.resources.all_u2_zpools().len(), 1);
         Zpool::destroy(&zpool_name).unwrap();
@@ -903,7 +928,8 @@ mod tests {
     #[tokio::test]
     async fn detected_raw_disk_removal_triggers_notification() {
         illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
-        let logctx = test_setup_log("detected_raw_disk_removal_triggers_notification");
+        let logctx =
+            test_setup_log("detected_raw_disk_removal_triggers_notification");
         let (mut key_manager, key_requester) =
             KeyManager::new(&logctx.log, HardcodedSecretRetriever::default());
         let (manager, mut handle) =

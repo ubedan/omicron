@@ -259,9 +259,7 @@ impl Server {
             sled_agent.load_services().await;
             SledAgentState::ServerStarted(sled_agent_server)
         } else {
-            SledAgentState::Bootstrapping(
-                Some(sled_agent_started_tx),
-            )
+            SledAgentState::Bootstrapping(Some(sled_agent_started_tx))
         };
 
         // Spawn our inner task that handles any future hardware updates and any
@@ -304,9 +302,7 @@ impl Server {
 // bootstrap server).
 enum SledAgentState {
     // We're still in the bootstrapping phase, waiting for a sled-agent request.
-    Bootstrapping(
-        Option<oneshot::Sender<SledAgent>>,
-    ),
+    Bootstrapping(Option<oneshot::Sender<SledAgent>>),
     // ... or the sled agent server is running.
     ServerStarted(SledAgentServer),
 }
@@ -553,9 +549,7 @@ impl Inner {
         log: &Logger,
     ) {
         match &mut self.state {
-            SledAgentState::Bootstrapping(
-                sled_agent_started_tx,
-            ) => {
+            SledAgentState::Bootstrapping(sled_agent_started_tx) => {
                 let request_id = request.body.id;
 
                 // Extract from options to satisfy the borrow checker.

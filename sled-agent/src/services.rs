@@ -4212,8 +4212,8 @@ mod test {
         }
     }
 
-    async fn setup_storage() -> StorageHandle {
-        let (manager, handle) = FakeStorageManager::new();
+    async fn setup_storage(log: &Logger) -> StorageHandle {
+        let (manager, handle) = FakeStorageManager::new(log);
 
         // Spawn the storage manager as done by sled-agent
         tokio::spawn(async move {
@@ -4223,11 +4223,11 @@ mod test {
         let internal_zpool_name = ZpoolName::new_internal(Uuid::new_v4());
         let internal_disk: RawDisk =
             SyntheticDisk::new(internal_zpool_name).into();
-        handle.upsert_disk(internal_disk).await;
+        handle.detected_raw_disk(internal_disk).await;
         let external_zpool_name = ZpoolName::new_external(Uuid::new_v4());
         let external_disk: RawDisk =
             SyntheticDisk::new(external_zpool_name).into();
-        handle.upsert_disk(external_disk).await;
+        handle.detected_raw_disk(external_disk).await;
 
         handle
     }
@@ -4247,7 +4247,7 @@ mod test {
             test_config: &'a TestConfig,
         ) -> LedgerTestHelper {
             let ddmd_client = DdmAdminClient::localhost(&log).unwrap();
-            let storage_handle = setup_storage().await;
+            let storage_handle = setup_storage(&log).await;
             let zone_bundler = ZoneBundler::new(
                 log.clone(),
                 storage_handle.clone(),

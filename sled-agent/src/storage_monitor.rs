@@ -8,7 +8,7 @@
 
 use crate::dump_setup::DumpSetup;
 use sled_storage::manager::StorageHandle;
-use sled_storage::resources::StorageResources;
+use sled_storage::resources::AllDisks;
 use slog::Logger;
 
 pub struct StorageMonitor {
@@ -20,17 +20,10 @@ pub struct StorageMonitor {
 }
 
 impl StorageMonitor {
-    pub fn new(
-        log: &Logger,
-        storage_manager: StorageHandle,
-    ) -> StorageMonitor {
+    pub fn new(log: &Logger, storage_manager: StorageHandle) -> StorageMonitor {
         let dump_setup = DumpSetup::new(&log);
         let log = log.new(o!("component" => "StorageMonitor"));
-        StorageMonitor {
-            log,
-            storage_manager,
-            dump_setup,
-        }
+        StorageMonitor { log, storage_manager, dump_setup }
     }
 
     /// Run the main receive loop of the `StorageMonitor`
@@ -39,24 +32,23 @@ impl StorageMonitor {
     pub async fn run(mut self) {
         loop {
             tokio::select! {
-                resources = self.storage_manager.wait_for_changes() => {
+                disks = self.storage_manager.wait_for_changes() => {
                     info!(
                         self.log,
                         "Received storage manager update";
-                        "resources" => ?resources
+                        "disks" => ?disks
                     );
-                    self.handle_resource_update(resources).await;
+                    self.handle_resource_update(disks).await;
                 }
             }
         }
     }
 
-    async fn handle_resource_update(
-        &mut self,
-        updated_resources: StorageResources,
-    ) {
-        self.dump_setup.update_dumpdev_setup(
-            updated_resources.managed_disks().map(|(_id, disk)| disk)
-        ).await;
+    async fn handle_resource_update(&mut self, updated_disks: AllDisks) {
+        self.dump_setup
+            .update_dumpdev_setup(
+                updated_disks.iter_managed().map(|(_id, disk)| disk),
+            )
+            .await;
     }
 }

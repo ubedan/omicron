@@ -137,7 +137,6 @@ pub struct UnparsedDisk {
 }
 
 impl UnparsedDisk {
-    #[allow(dead_code)]
     pub fn new(
         devfs_path: Utf8PathBuf,
         dev_path: Option<Utf8PathBuf>,
@@ -205,7 +204,8 @@ impl PooledDisk {
         let variant = unparsed_disk.variant;
         // Ensure the GPT has the right format. This does not necessarily
         // mean that the partitions are populated with the data we need.
-        let partitions = ensure_partition_layout(&log, &paths, variant, zpool_id)?;
+        let partitions =
+            ensure_partition_layout(&log, &paths, variant, zpool_id)?;
 
         // Find the path to the zpool which exists on this disk.
         //
@@ -217,7 +217,8 @@ impl PooledDisk {
             false,
         )?;
 
-        let zpool_name = Self::ensure_zpool_exists(log, variant, &zpool_path, zpool_id)?;
+        let zpool_name =
+            Self::ensure_zpool_exists(log, variant, &zpool_path, zpool_id)?;
         Self::ensure_zpool_imported(log, &zpool_name)?;
         Self::ensure_zpool_failmode_is_continue(log, &zpool_name)?;
 
@@ -245,11 +246,14 @@ impl PooledDisk {
                     let observed = zpool_name.id();
                     if expected != observed {
                         warn!(log, "Zpool UUID mismatch"; "expected" => ?expected, "observed" => ?observed);
-                        return Err(PooledDiskError::UnexpectedUuid { expected, observed });
+                        return Err(PooledDiskError::UnexpectedUuid {
+                            expected,
+                            observed,
+                        });
                     }
                 }
                 zpool_name
-            },
+            }
             Err(_) => {
                 // What happened here?
                 // - We saw that a GPT exists for this Disk (or we didn't, and
@@ -271,12 +275,12 @@ impl PooledDisk {
                     Some(id) => {
                         info!(log, "Formatting zpool with requested ID"; "id" => ?id);
                         id
-                    },
+                    }
                     None => {
                         let id = Uuid::new_v4();
                         info!(log, "Formatting zpool with generated ID"; "id" => ?id);
                         id
-                    },
+                    }
                 };
 
                 // If a zpool does not already exist, create one.

@@ -179,7 +179,9 @@ impl HardwareMonitor {
                     self.storage_manager.detected_raw_disk(disk.into()).await;
                 }
                 HardwareUpdate::DiskRemoved(disk) => {
-                    self.storage_manager.detected_raw_disk_removal(disk.into()).await;
+                    self.storage_manager
+                        .detected_raw_disk_removal(disk.into())
+                        .await;
                 }
             },
             Err(broadcast::error::RecvError::Lagged(count)) => {

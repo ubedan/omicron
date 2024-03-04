@@ -81,7 +81,9 @@ pub fn ensure_partition_layout(
     variant: DiskVariant,
     zpool_id: Option<Uuid>,
 ) -> Result<Vec<Partition>, PooledDiskError> {
-    internal_ensure_partition_layout::<libefi_illumos::Gpt>(log, paths, variant, zpool_id)
+    internal_ensure_partition_layout::<libefi_illumos::Gpt>(
+        log, paths, variant, zpool_id,
+    )
 }
 
 // Same as the [ensure_partition_layout], but with generic parameters
@@ -129,7 +131,7 @@ fn internal_ensure_partition_layout<GPT: gpt::LibEfiGpt>(
                     );
                     let Some(zpool_id) = zpool_id else {
                         return Err(PooledDiskError::MissingZpoolUuid);
-                    }
+                    };
 
                     // If a zpool does not already exist, create one.
                     let zpool_name = ZpoolName::new_external(zpool_id);

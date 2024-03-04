@@ -22,14 +22,18 @@ use uuid::Uuid;
 
 use crate::dataset;
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash,
+)]
 pub struct OmicronPhysicalDiskConfig {
     pub identity: DiskIdentity,
     pub id: Uuid,
     pub pool_id: Uuid,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash,
+)]
 pub struct OmicronPhysicalDisksConfig {
     /// generation number of this configuration
     ///
@@ -55,10 +59,7 @@ impl Ledgerable for OmicronPhysicalDisksConfig {
 
 impl OmicronPhysicalDisksConfig {
     pub fn new() -> Self {
-        Self {
-            generation: Generation::new(),
-            disks: vec![],
-        }
+        Self { generation: Generation::new(), disks: vec![] }
     }
 }
 
@@ -294,6 +295,24 @@ impl Disk {
         match self {
             Self::Real(disk) => disk.slot,
             Self::Synthetic(_) => unreachable!(),
+        }
+    }
+}
+
+impl From<Disk> for RawDisk {
+    fn from(disk: Disk) -> RawDisk {
+        match disk {
+            Disk::Real(pooled_disk) => RawDisk::Real(UnparsedDisk::new(
+                pooled_disk.paths.devfs_path,
+                pooled_disk.paths.dev_path,
+                pooled_disk.slot,
+                pooled_disk.variant,
+                pooled_disk.identity,
+                pooled_disk.is_boot_disk,
+            )),
+            Disk::Synthetic(synthetic_disk) => {
+                RawDisk::Synthetic(synthetic_disk)
+            }
         }
     }
 }
