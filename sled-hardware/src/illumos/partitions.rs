@@ -99,7 +99,8 @@ fn internal_ensure_partition_layout<GPT: gpt::LibEfiGpt>(
     // making too many assumptions about it.
     let raw = true;
     let path = paths.whole_disk(raw);
-    let log = log.new(o!("path" => paths.devfs_path));
+    let devfs_path_str = paths.devfs_path.as_str().to_string();
+    let log = log.new(slog::o!("path" => devfs_path_str));
 
     let gpt = match GPT::read(&path) {
         Ok(gpt) => {
@@ -127,7 +128,7 @@ fn internal_ensure_partition_layout<GPT: gpt::LibEfiGpt>(
                     info!(
                         log,
                         "Formatting zpool on disk";
-                        "uuid" => zpool_id,
+                        "uuid" => ?zpool_id,
                     );
                     let Some(zpool_id) = zpool_id else {
                         return Err(PooledDiskError::MissingZpoolUuid);
@@ -209,6 +210,7 @@ mod test {
             &log,
             &DiskPaths { devfs_path, dev_path: None },
             DiskVariant::U2,
+            None,
         );
         match result {
             Err(PooledDiskError::CannotFormatMissingDevPath { .. }) => {}
@@ -242,6 +244,7 @@ mod test {
                 dev_path: Some(Utf8PathBuf::from(DEV_PATH)),
             },
             DiskVariant::U2,
+            Some(Uuid::new_v4()),
         )
         .expect("Should have succeeded partitioning disk");
 
@@ -266,6 +269,7 @@ mod test {
                 dev_path: Some(Utf8PathBuf::from(DEV_PATH))
             },
             DiskVariant::M2,
+            None,
         )
         .is_err());
 
@@ -303,6 +307,7 @@ mod test {
                 dev_path: Some(Utf8PathBuf::from(DEV_PATH)),
             },
             DiskVariant::U2,
+            None,
         )
         .expect("Should be able to parse disk");
 
@@ -345,6 +350,7 @@ mod test {
                 dev_path: Some(Utf8PathBuf::from(DEV_PATH)),
             },
             DiskVariant::M2,
+            None,
         )
         .expect("Should be able to parse disk");
 
@@ -384,6 +390,7 @@ mod test {
                     dev_path: Some(Utf8PathBuf::from(DEV_PATH)),
                 },
                 DiskVariant::M2,
+                None,
             )
             .expect_err("Should have failed parsing empty GPT"),
             PooledDiskError::BadPartitionLayout { .. }
@@ -409,6 +416,7 @@ mod test {
                     dev_path: Some(Utf8PathBuf::from(DEV_PATH)),
                 },
                 DiskVariant::U2,
+                None,
             )
             .expect_err("Should have failed parsing empty GPT"),
             PooledDiskError::BadPartitionLayout { .. }

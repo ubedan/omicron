@@ -33,7 +33,7 @@ pub enum PooledDiskError {
     #[error("Requested partition {partition:?} not found on device {path}")]
     NotFound { path: Utf8PathBuf, partition: Partition },
     #[error("Zpool UUID required to format this disk")]
-    MissingZoolUuid,
+    MissingZpoolUuid,
     #[error("Observed Zpool with unexpected UUID (saw: {observed}, expected: {expected})")]
     UnexpectedUuid { expected: Uuid, observed: Uuid },
     #[error(transparent)]
