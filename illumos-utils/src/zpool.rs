@@ -12,8 +12,8 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
-const ZPOOL_EXTERNAL_PREFIX: &str = "oxp_";
-const ZPOOL_INTERNAL_PREFIX: &str = "oxi_";
+pub const ZPOOL_EXTERNAL_PREFIX: &str = "oxp_";
+pub const ZPOOL_INTERNAL_PREFIX: &str = "oxi_";
 const ZPOOL: &str = "/usr/sbin/zpool";
 
 pub const ZPOOL_MOUNTPOINT_ROOT: &str = "/";

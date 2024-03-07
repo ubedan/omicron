@@ -3921,7 +3921,8 @@ mod test {
     };
     use sled_storage::disk::{RawDisk, RawSyntheticDisk};
 
-    use sled_storage::manager::{FakeStorageManager, StorageHandle};
+    use sled_storage::manager::StorageHandle;
+    use sled_storage::manager_test_harness::FakeStorageManager;
     use std::net::{Ipv6Addr, SocketAddrV6};
     use std::os::unix::process::ExitStatusExt;
     use uuid::Uuid;

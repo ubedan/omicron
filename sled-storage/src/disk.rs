@@ -107,7 +107,7 @@ impl SyntheticDisk {
 
 // A synthetic disk that acts as one "found" by the hardware and that is backed
 // by a zpool
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct RawSyntheticDisk {
     pub path: Utf8PathBuf,
     pub identity: DiskIdentity,
@@ -155,7 +155,7 @@ impl RawSyntheticDisk {
 }
 
 // An [`UnparsedDisk`] disk learned about from the hardware or a wrapped zpool
-#[derive(Debug, Clone, PartialEq, Eq, Hash, From)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, From)]
 pub enum RawDisk {
     Real(UnparsedDisk),
     Synthetic(RawSyntheticDisk),

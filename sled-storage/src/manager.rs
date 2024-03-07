@@ -53,7 +53,7 @@ use uuid::Uuid;
 // large messages.
 //
 // Here we start relatively small so that we can evaluate our choice over time.
-const QUEUE_SIZE: usize = 256;
+pub(crate) const QUEUE_SIZE: usize = 256;
 
 // The filename of the ledger storing physical disk info
 const DISKS_LEDGER_FILENAME: &str = "omicron-physical-disks.json";
@@ -83,14 +83,14 @@ pub enum StorageManagerState {
 }
 
 #[derive(Debug)]
-struct NewFilesystemRequest {
+pub(crate) struct NewFilesystemRequest {
     dataset_id: Uuid,
     dataset_name: DatasetName,
     responder: DebugIgnore<oneshot::Sender<Result<(), Error>>>,
 }
 
 #[derive(Debug)]
-enum StorageRequest {
+pub(crate) enum StorageRequest {
     // Requests to manage which devices the sled considers active.
     // These are manipulated by hardware management.
     DetectedRawDisk {
@@ -141,6 +141,13 @@ pub struct StorageHandle {
 }
 
 impl StorageHandle {
+    pub(crate) fn new(tx: mpsc::Sender<StorageRequest>, disk_updates: watch::Receiver<AllDisks>) -> Self {
+        Self {
+            tx,
+            disk_updates,
+        }
+    }
+
     /// Adds a disk and associated zpool to the storage manager.
     ///
     /// Returns a future which completes once the notification has been
@@ -292,70 +299,6 @@ impl StorageHandle {
         rx.await.unwrap()
     }
 }
-
-// Some sled-agent tests cannot currently use the real StorageManager
-// and want to fake the entire behavior, but still have access to the
-// `StorageResources`. We allow this via use of the `FakeStorageManager`
-// that will respond to real storage requests from a real `StorageHandle`.
-#[cfg(feature = "testing")]
-pub struct FakeStorageManager {
-    rx: mpsc::Receiver<StorageRequest>,
-    _key_manager: key_manager::KeyManager<HardcodedSecretRetriever>,
-    resources: StorageResources,
-}
-
-#[cfg(feature = "testing")]
-impl FakeStorageManager {
-    pub fn new(log: &Logger) -> (Self, StorageHandle) {
-        let (tx, rx) = mpsc::channel(QUEUE_SIZE);
-        let (_key_manager, key_requester) = key_manager::KeyManager::new(
-            &log,
-            HardcodedSecretRetriever::default(),
-        );
-        let resources =
-            StorageResources::new(log, MountConfig::default(), key_requester);
-        let disk_updates = resources.watch_disks();
-        (
-            Self { rx, _key_manager, resources },
-            StorageHandle { tx, disk_updates },
-        )
-    }
-
-    /// Run the main receive loop of the `FakeStorageManager`
-    ///
-    /// This should be spawned into a tokio task
-    pub async fn run(mut self) {
-        loop {
-            match self.rx.recv().await {
-                Some(StorageRequest::DetectedRawDisk { raw_disk, tx }) => {
-                    self.detected_raw_disk(raw_disk);
-                    let _ = tx.0.send(Ok(()));
-                }
-                Some(StorageRequest::GetLatestResources(tx)) => {
-                    let _ = tx.0.send(self.resources.disks().clone());
-                }
-                Some(_) => {
-                    unreachable!();
-                }
-                None => break,
-            }
-        }
-    }
-
-    // Add a disk to `StorageResources` if it is new and return true if so
-    fn detected_raw_disk(&mut self, raw_disk: RawDisk) {
-        match &raw_disk {
-            RawDisk::Real(_) => {
-                panic!(
-                    "Only synthetic disks can be used with `FakeStorageManager`"
-                );
-            }
-            RawDisk::Synthetic(_) => (),
-        };
-        self.resources.insert_raw_disk(raw_disk);
-    }
-}
-
 /// The storage manager responsible for the state of the storage
 /// on a sled. The storage manager runs in its own task and is interacted
 /// with via the [`StorageHandle`].
@@ -765,254 +708,6 @@ impl StorageManager {
     }
 }
 
-/// A [`key-manager::SecretRetriever`] that only returns hardcoded IKM for
-/// epoch 0
-#[cfg(any(feature = "testing", test))]
-#[derive(Debug, Default)]
-struct HardcodedSecretRetriever {
-    inject_error: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-#[cfg(any(feature = "testing", test))]
-#[async_trait::async_trait]
-impl key_manager::SecretRetriever for HardcodedSecretRetriever {
-    async fn get_latest(
-        &self,
-    ) -> Result<key_manager::VersionedIkm, key_manager::SecretRetrieverError>
-    {
-        if self.inject_error.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(key_manager::SecretRetrieverError::Bootstore(
-                "Timeout".to_string(),
-            ));
-        }
-
-        let epoch = 0;
-        let salt = [0u8; 32];
-        let secret = [0x1d; 32];
-
-        Ok(key_manager::VersionedIkm::new(epoch, salt, &secret))
-    }
-
-    /// We don't plan to do any key rotation before trust quorum is ready
-    async fn get(
-        &self,
-        epoch: u64,
-    ) -> Result<key_manager::SecretState, key_manager::SecretRetrieverError>
-    {
-        if self.inject_error.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(key_manager::SecretRetrieverError::Bootstore(
-                "Timeout".to_string(),
-            ));
-        }
-        if epoch != 0 {
-            return Err(key_manager::SecretRetrieverError::NoSuchEpoch(epoch));
-        }
-        Ok(key_manager::SecretState::Current(self.get_latest().await?))
-    }
-}
-
-/// A helper utility for tests that want to use a StorageManager.
-///
-/// Attempts to make it easy to create a set of vdev-based M.2 and U.2
-/// devices, which can be formatted with arbitrary zpools.
-#[cfg(any(feature = "testing", test))]
-pub struct StorageManagerTestHarness {
-    handle: StorageHandle,
-    vdev_dir: camino_tempfile::Utf8TempDir,
-    vdevs: std::collections::HashSet<RawDisk>,
-    key_manager_error_injector: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    key_manager_task: tokio::task::JoinHandle<()>,
-    storage_manager_task: tokio::task::JoinHandle<()>,
-}
-
-#[cfg(any(feature = "testing", test))]
-impl StorageManagerTestHarness {
-    /// Creates a new StorageManagerTestHarness with no associated disks.
-    pub async fn new(log: &Logger) -> Self {
-        illumos_utils::USE_MOCKS
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        let tmp = camino_tempfile::tempdir()
-            .expect("Failed to make temporary directory");
-        info!(log, "Using tmp: {}", tmp.path());
-        Self::new_with_tmp_dir(log, tmp).await
-    }
-
-    async fn new_with_tmp_dir(
-        log: &Logger,
-        tmp: camino_tempfile::Utf8TempDir,
-    ) -> Self {
-        let mount_config = MountConfig { root: tmp.path().into() };
-
-        let key_manager_error_injector =
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (mut key_manager, key_requester) = key_manager::KeyManager::new(
-            &log,
-            HardcodedSecretRetriever {
-                inject_error: key_manager_error_injector.clone(),
-            },
-        );
-        let (manager, handle) =
-            StorageManager::new(&log, mount_config, key_requester);
-
-        // Spawn the key_manager so that it will respond to requests for encryption keys
-        let key_manager_task =
-            tokio::spawn(async move { key_manager.run().await });
-
-        // Spawn the storage manager as done by sled-agent
-        let storage_manager_task = tokio::spawn(async move {
-            manager.run().await;
-        });
-
-        Self {
-            handle,
-            vdev_dir: tmp,
-            vdevs: std::collections::HashSet::new(),
-            key_manager_error_injector,
-            key_manager_task,
-            storage_manager_task,
-        }
-    }
-
-    /// Emulate a system rebooting.
-    ///
-    /// - Stops the currently running tasks and restarts them
-    /// - Re-inserts all vdevs previously created by [Self::add_vdevs].
-    pub async fn reboot(self, log: &Logger) -> Self {
-        // Deconstruct the test harness
-        let StorageManagerTestHarness {
-            vdev_dir,
-            vdevs,
-            key_manager_task,
-            storage_manager_task,
-            ..
-        } = self;
-
-        // Abort ongoing tasks, in lieu of a cleaner shutdown mechanism.
-        key_manager_task.abort();
-        storage_manager_task.abort();
-
-        // Re-create all the state we created during the constructor, but
-        // leave the temporary directory as it was "before reboot".
-        let mut slef = Self::new_with_tmp_dir(log, vdev_dir).await;
-
-        // Notify ourselves of the new disks, just as the hardware would.
-        //
-        // NOTE: Technically, if these disks have pools, they're still imported.
-        // However, the SledManager doesn't know about them, and wouldn't
-        // assume they're being managed right now.
-        for raw_disk in vdevs {
-            slef.handle
-                .detected_raw_disk(raw_disk.clone())
-                .await // Notify StorageManager
-                .await // Wait for it to finish processing
-                .unwrap();
-            slef.vdevs.insert(raw_disk.clone());
-        }
-
-        slef
-    }
-
-    /// Adds raw devices to the [crate::manager::StorageManager], as if they were detected via
-    /// hardware. Can be called several times.
-    pub async fn add_vdevs<P: AsRef<str> + ?Sized>(
-        &mut self,
-        vdevs: &[&P],
-    ) -> Vec<RawDisk> {
-        let mut added = vec![];
-        for vdev in vdevs.iter().map(|vdev| Utf8PathBuf::from(vdev.as_ref())) {
-            assert!(vdev.is_relative());
-            let vdev_path = self.vdev_dir.path().join(&vdev);
-            let raw_disk: RawDisk =
-                crate::disk::RawSyntheticDisk::new_with_length(
-                    &vdev_path,
-                    1 << 30,
-                )
-                .expect(&format!("Failed to create synthetic disk for {vdev}"))
-                .into();
-            self.handle
-                .detected_raw_disk(raw_disk.clone())
-                .await // Notify StorageManager
-                .await // Wait for it to finish processing
-                .unwrap();
-
-            self.vdevs.insert(raw_disk.clone());
-            added.push(raw_disk);
-        }
-        added
-    }
-
-    /// Helper function to destroy all zpools
-    pub async fn cleanup(mut self) {
-        let disks = self.handle().get_latest_disks().await;
-        let pools = disks.get_all_zpools();
-        for (pool, _) in pools {
-            illumos_utils::zpool::Zpool::destroy(&pool)
-                .expect("Failed to destroy zpool");
-        }
-
-        // Stop the harness, other than the temporary directory.
-        let StorageManagerTestHarness { vdev_dir, .. } = self;
-
-        // Make sure that we're actually able to delete everything within the
-        // temporary directory.
-        //
-        // This is necessary because the act of mounting datasets within this
-        // directory may have created directories owned by root, and the test
-        // process may not have been started as root.
-        //
-        // Since we're about to delete all these files anyway, make them
-        // accessible to everyone before destroying them.
-        let mut command = std::process::Command::new("/usr/bin/pfexec");
-        let mount = vdev_dir.path();
-        let cmd = command.args(["chmod", "-R", "a+rw", mount.as_str()]);
-        cmd.output().expect(
-            "Failed to change ownership of the temporary directory we're trying to delete"
-        );
-
-        // Actually delete everything, and check the result to fail loud if
-        // something goes wrong.
-        vdev_dir.close().expect("Failed to clean up temporary directory");
-    }
-
-    pub fn make_config(
-        &self,
-        generation: u32,
-        disks: &[RawDisk],
-    ) -> OmicronPhysicalDisksConfig {
-        let disks = disks
-            .into_iter()
-            .map(|raw| {
-                let identity = raw.identity();
-
-                crate::disk::OmicronPhysicalDiskConfig {
-                    identity: identity.clone(),
-                    id: Uuid::new_v4(),
-                    pool_id: Uuid::new_v4(),
-                }
-            })
-            .collect();
-
-        OmicronPhysicalDisksConfig {
-            generation: omicron_common::api::external::Generation::from(
-                generation,
-            ),
-            disks,
-        }
-    }
-
-    /// Returns the underlying [crate::manager::StorageHandle].
-    pub fn handle(&mut self) -> &mut StorageHandle {
-        &mut self.handle
-    }
-
-    /// Set to "true" to throw errors, "false" to not inject errors.
-    pub fn key_manager_error_injector(
-        &self,
-    ) -> &std::sync::Arc<std::sync::atomic::AtomicBool> {
-        &self.key_manager_error_injector
-    }
-}
-
 /// All tests only use synthetic disks, but are expected to be run on illumos
 /// systems.
 #[cfg(all(test, target_os = "illumos"))]
@@ -1020,6 +715,7 @@ mod tests {
     use crate::dataset::DatasetKind;
     use crate::disk::RawSyntheticDisk;
     use crate::resources::DiskManagementError;
+    use crate::manager_test_harness::StorageManagerTestHarness;
 
     use super::*;
     use camino_tempfile::tempdir;
