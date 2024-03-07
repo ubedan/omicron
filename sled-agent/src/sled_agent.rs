@@ -341,7 +341,7 @@ impl SledAgent {
 
         let storage_manager = &long_running_task_handles.storage_manager;
         let boot_disk = storage_manager
-            .get_latest_resources()
+            .get_latest_disks()
             .await
             .boot_disk()
             .ok_or_else(|| Error::BootDiskNotFound)?;
@@ -928,7 +928,7 @@ impl SledAgent {
     pub async fn zpools_get(&self) -> Vec<Zpool> {
         self.inner
             .storage
-            .get_latest_resources()
+            .get_latest_disks()
             .await
             .get_all_zpools()
             .into_iter()
@@ -1180,7 +1180,7 @@ impl SledAgent {
         };
         let disks = self
             .storage()
-            .get_latest_resources()
+            .get_latest_disks()
             .await
             .iter_all()
             .map(|(identity, variant)| crate::params::InventoryDisk {

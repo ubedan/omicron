@@ -176,10 +176,18 @@ impl HardwareMonitor {
                     }
                 }
                 HardwareUpdate::DiskAdded(disk) => {
-                    self.storage_manager.detected_raw_disk(disk.into()).await;
+                    // We notify the storage manager of the hardware, but do not need to
+                    // wait for the result to be fully processed.
+                    let _ = self
+                        .storage_manager
+                        .detected_raw_disk(disk.into())
+                        .await;
                 }
                 HardwareUpdate::DiskRemoved(disk) => {
-                    self.storage_manager
+                    // We notify the storage manager of the hardware, but do not need to
+                    // wait for the result to be fully processed.
+                    let _ = self
+                        .storage_manager
                         .detected_raw_disk_removal(disk.into())
                         .await;
                 }
@@ -250,7 +258,10 @@ impl HardwareMonitor {
             self.deactivate_switch().await;
         }
 
-        self.storage_manager
+        // We notify the storage manager of the hardware, but do not need to
+        // wait for the result to be fully processed.
+        let _ = self
+            .storage_manager
             .ensure_using_exactly_these_disks(
                 self.hardware_manager.disks().into_iter().map(RawDisk::from),
             )

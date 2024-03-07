@@ -96,6 +96,7 @@ use sled_hardware::underlay;
 use sled_hardware::underlay::BOOTSTRAP_PREFIX;
 use sled_hardware::Baseboard;
 use sled_hardware::SledMode;
+use sled_storage::config::MountConfig;
 use sled_storage::dataset::{
     DatasetKind, DatasetName, CONFIG_DATASET, INSTALL_DATASET, ZONE_DATASET,
 };
@@ -752,7 +753,7 @@ impl ServiceManager {
         if let Some(dir) = self.inner.ledger_directory_override.get() {
             return vec![dir.join(SERVICES_LEDGER_FILENAME)];
         }
-        let resources = self.inner.storage.get_latest_resources().await;
+        let resources = self.inner.storage.get_latest_disks().await;
         resources
             .all_m2_mountpoints(CONFIG_DATASET)
             .into_iter()
@@ -764,7 +765,7 @@ impl ServiceManager {
         if let Some(dir) = self.inner.ledger_directory_override.get() {
             return vec![dir.join(ZONES_LEDGER_FILENAME)];
         }
-        let resources = self.inner.storage.get_latest_resources().await;
+        let resources = self.inner.storage.get_latest_disks().await;
         resources
             .all_m2_mountpoints(CONFIG_DATASET)
             .into_iter()
@@ -1529,11 +1530,12 @@ impl ServiceManager {
 
         // If the boot disk exists, look for the image in the "install" dataset
         // there too.
-        if let Some((_, boot_zpool)) =
-            self.inner.storage.get_latest_resources().await.boot_disk()
-        {
-            zone_image_paths
-                .push(boot_zpool.dataset_mountpoint(INSTALL_DATASET));
+        let all_disks = self.inner.storage.get_latest_disks().await;
+        if let Some((_, boot_zpool)) = all_disks.boot_disk() {
+            zone_image_paths.push(boot_zpool.dataset_mountpoint(
+                &all_disks.mount_config.root,
+                INSTALL_DATASET,
+            ));
         }
 
         let zone_type_str = match &request {
@@ -2754,6 +2756,7 @@ impl ServiceManager {
     // storage configuration against the reality of the current sled.
     async fn start_omicron_zone(
         &self,
+        mount_config: &MountConfig,
         zone: &OmicronZoneConfig,
         time_is_synchronized: bool,
         all_u2_pools: &Vec<ZpoolName>,
@@ -2771,7 +2774,11 @@ impl ServiceManager {
 
         // Ensure that this zone's storage is ready.
         let root = self
-            .validate_storage_and_pick_mountpoint(&zone, &all_u2_pools)
+            .validate_storage_and_pick_mountpoint(
+                mount_config,
+                &zone,
+                &all_u2_pools,
+            )
             .await?;
 
         let config = OmicronZoneConfigLocal { zone: zone.clone(), root };
@@ -2799,6 +2806,7 @@ impl ServiceManager {
     // to start.
     async fn start_omicron_zones(
         &self,
+        mount_config: &MountConfig,
         requests: impl Iterator<Item = &OmicronZoneConfig> + Clone,
         time_is_synchronized: bool,
         all_u2_pools: &Vec<ZpoolName>,
@@ -2813,9 +2821,14 @@ impl ServiceManager {
         }
 
         let futures = requests.map(|zone| async move {
-            self.start_omicron_zone(&zone, time_is_synchronized, all_u2_pools)
-                .await
-                .map_err(|err| (zone.zone_name().to_string(), err))
+            self.start_omicron_zone(
+                mount_config,
+                &zone,
+                time_is_synchronized,
+                all_u2_pools,
+            )
+            .await
+            .map_err(|err| (zone.zone_name().to_string(), err))
         });
 
         let results = futures::future::join_all(futures).await;
@@ -3026,7 +3039,8 @@ impl ServiceManager {
         }
 
         // Collect information that's necessary to start new zones
-        let storage = self.inner.storage.get_latest_resources().await;
+        let storage = self.inner.storage.get_latest_disks().await;
+        let mount_config = &storage.mount_config;
         let all_u2_pools = storage.all_u2_zpools();
         let time_is_synchronized =
             match self.timesync_get_locked(&existing_zones).await {
@@ -3039,6 +3053,7 @@ impl ServiceManager {
         // Concurrently boot all new zones
         let StartZonesResult { new_zones, errors } = self
             .start_omicron_zones(
+                mount_config,
                 zones_to_be_added,
                 time_is_synchronized,
                 &all_u2_pools,
@@ -3138,6 +3153,7 @@ impl ServiceManager {
     // is valid.
     async fn validate_storage_and_pick_mountpoint(
         &self,
+        mount_config: &MountConfig,
         zone: &OmicronZoneConfig,
         all_u2_pools: &Vec<ZpoolName>,
     ) -> Result<Utf8PathBuf, Error> {
@@ -3196,14 +3212,16 @@ impl ServiceManager {
                     device: format!("zpool: {data_pool}"),
                 });
             }
-            data_pool.dataset_mountpoint(ZONE_DATASET)
+            data_pool.dataset_mountpoint(&mount_config.root, ZONE_DATASET)
         } else {
             // If the zone it not coupled to other datsets, we pick one
             // arbitrarily.
             let mut rng = rand::thread_rng();
             all_u2_pools
                 .choose(&mut rng)
-                .map(|pool| pool.dataset_mountpoint(ZONE_DATASET))
+                .map(|pool| {
+                    pool.dataset_mountpoint(&mount_config.root, ZONE_DATASET)
+                })
                 .ok_or_else(|| Error::U2NotFound)?
                 .clone()
         };
@@ -3893,7 +3911,6 @@ impl ServiceManager {
 #[cfg(test)]
 mod test {
     use super::*;
-    use illumos_utils::zpool::ZpoolName;
     use illumos_utils::{
         dladm::{
             Etherstub, MockDladm, BOOTSTRAP_ETHERSTUB_NAME,
@@ -3902,7 +3919,7 @@ mod test {
         svc,
         zone::MockZones,
     };
-    use sled_storage::disk::{RawDisk, SyntheticDisk};
+    use sled_storage::disk::{RawDisk, RawSyntheticDisk};
 
     use sled_storage::manager::{FakeStorageManager, StorageHandle};
     use std::net::{Ipv6Addr, SocketAddrV6};
@@ -4212,7 +4229,9 @@ mod test {
         }
     }
 
-    async fn setup_storage(log: &Logger) -> StorageHandle {
+    async fn setup_storage(
+        log: &Logger,
+    ) -> (StorageHandle, camino_tempfile::Utf8TempDir) {
         let (manager, handle) = FakeStorageManager::new(log);
 
         // Spawn the storage manager as done by sled-agent
@@ -4220,23 +4239,30 @@ mod test {
             manager.run().await;
         });
 
-        let internal_zpool_name = ZpoolName::new_internal(Uuid::new_v4());
-        let internal_disk: RawDisk =
-            SyntheticDisk::new(internal_zpool_name).into();
-        handle.detected_raw_disk(internal_disk).await;
-        let external_zpool_name = ZpoolName::new_external(Uuid::new_v4());
-        let external_disk: RawDisk =
-            SyntheticDisk::new(external_zpool_name).into();
-        handle.detected_raw_disk(external_disk).await;
+        let vdev_dir = camino_tempfile::tempdir().unwrap();
 
-        handle
+        let internal_vdev_path = vdev_dir.path().join("m2_test.vdev");
+        let internal_disk: RawDisk =
+            RawSyntheticDisk::new_with_length(internal_vdev_path, 1 << 30)
+                .unwrap()
+                .into();
+        handle.detected_raw_disk(internal_disk).await.await.unwrap();
+
+        let external_vdev_path = vdev_dir.path().join("u2_test.vdev");
+        let external_disk: RawDisk =
+            RawSyntheticDisk::new_with_length(external_vdev_path, 1 << 30)
+                .unwrap()
+                .into();
+        handle.detected_raw_disk(external_disk).await.await.unwrap();
+
+        (handle, vdev_dir)
     }
 
-    #[derive(Clone)]
     struct LedgerTestHelper<'a> {
         log: slog::Logger,
         ddmd_client: DdmAdminClient,
         storage_handle: StorageHandle,
+        _tmpdir: camino_tempfile::Utf8TempDir,
         zone_bundler: ZoneBundler,
         test_config: &'a TestConfig,
     }
@@ -4247,7 +4273,7 @@ mod test {
             test_config: &'a TestConfig,
         ) -> LedgerTestHelper {
             let ddmd_client = DdmAdminClient::localhost(&log).unwrap();
-            let storage_handle = setup_storage(&log).await;
+            let (storage_handle, tmpdir) = setup_storage(&log).await;
             let zone_bundler = ZoneBundler::new(
                 log.clone(),
                 storage_handle.clone(),
@@ -4258,30 +4284,31 @@ mod test {
                 log,
                 ddmd_client,
                 storage_handle,
+                _tmpdir: tmpdir,
                 zone_bundler,
                 test_config,
             }
         }
 
-        fn new_service_manager(self) -> ServiceManager {
+        fn new_service_manager(&self) -> ServiceManager {
             self.new_service_manager_with_timesync(TimeSyncConfig::Skip)
         }
 
         fn new_service_manager_with_timesync(
-            self,
+            &self,
             time_sync_config: TimeSyncConfig,
         ) -> ServiceManager {
             let log = &self.log;
             let mgr = ServiceManager::new(
                 log,
-                self.ddmd_client,
+                self.ddmd_client.clone(),
                 make_bootstrap_networking_config(),
                 SledMode::Auto,
                 time_sync_config,
                 SidecarRevision::Physical("rev-test".to_string()),
                 vec![],
-                self.storage_handle,
-                self.zone_bundler,
+                self.storage_handle.clone(),
+                self.zone_bundler.clone(),
             );
             self.test_config.override_paths(&mgr);
             mgr
@@ -4451,7 +4478,7 @@ mod test {
 
         // First, spin up a ServiceManager, create a new zone, and then tear
         // down the ServiceManager.
-        let mgr = helper.clone().new_service_manager();
+        let mgr = helper.new_service_manager();
         LedgerTestHelper::sled_agent_started(&logctx.log, &test_config, &mgr);
 
         let v2 = Generation::new().next();
@@ -4487,7 +4514,7 @@ mod test {
 
         // First, spin up a ServiceManager, create a new zone, and then tear
         // down the ServiceManager.
-        let mgr = helper.clone().new_service_manager();
+        let mgr = helper.new_service_manager();
         LedgerTestHelper::sled_agent_started(&logctx.log, &test_config, &mgr);
 
         let v1 = Generation::new();
@@ -4651,7 +4678,7 @@ mod test {
         // Now start the service manager.
         let helper =
             LedgerTestHelper::new(logctx.log.clone(), &test_config).await;
-        let mgr = helper.clone().new_service_manager();
+        let mgr = helper.new_service_manager();
         LedgerTestHelper::sled_agent_started(&logctx.log, &test_config, &mgr);
 
         // Trigger the migration code.  (Yes, it's hokey that we create this

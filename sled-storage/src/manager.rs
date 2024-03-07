@@ -6,11 +6,14 @@
 
 use std::collections::HashSet;
 
+use crate::config::MountConfig;
 use crate::dataset::{DatasetName, CONFIG_DATASET};
 use crate::disk::{OmicronPhysicalDisksConfig, RawDisk};
 use crate::error::Error;
 use crate::resources::{AllDisks, DisksManagementResult, StorageResources};
 use camino::Utf8PathBuf;
+use debug_ignore::DebugIgnore;
+use futures::future::FutureExt;
 use illumos_utils::zfs::{Mountpoint, Zfs};
 use illumos_utils::zpool::ZpoolName;
 use key_manager::StorageKeyRequester;
@@ -18,6 +21,7 @@ use omicron_common::disk::DiskIdentity;
 use omicron_common::ledger::Ledger;
 use sled_hardware::DiskVariant;
 use slog::{info, o, warn, Logger};
+use std::future::Future;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{interval, Duration, MissedTickBehavior};
 use uuid::Uuid;
@@ -82,21 +86,30 @@ pub enum StorageManagerState {
 struct NewFilesystemRequest {
     dataset_id: Uuid,
     dataset_name: DatasetName,
-    responder: oneshot::Sender<Result<(), Error>>,
+    responder: DebugIgnore<oneshot::Sender<Result<(), Error>>>,
 }
 
 #[derive(Debug)]
 enum StorageRequest {
     // Requests to manage which devices the sled considers active.
     // These are manipulated by hardware management.
-    DetectedRawDisk(RawDisk),
-    DetectedRawDiskRemoval(RawDisk),
-    DisksChanged(HashSet<RawDisk>),
+    DetectedRawDisk {
+        raw_disk: RawDisk,
+        tx: DebugIgnore<oneshot::Sender<Result<(), Error>>>,
+    },
+    DetectedRawDiskRemoval {
+        raw_disk: RawDisk,
+        tx: DebugIgnore<oneshot::Sender<Result<(), Error>>>,
+    },
+    DetectedRawDisksChanged {
+        raw_disks: HashSet<RawDisk>,
+        tx: DebugIgnore<oneshot::Sender<Result<(), Error>>>,
+    },
 
     // Requests to explicitly manage or stop managing a set of devices
     OmicronPhysicalDisksEnsure {
         config: OmicronPhysicalDisksConfig,
-        tx: oneshot::Sender<Result<DisksManagementResult, Error>>,
+        tx: DebugIgnore<oneshot::Sender<Result<DisksManagementResult, Error>>>,
     },
 
     // Requests the creation of a new dataset within a managed disk.
@@ -107,10 +120,10 @@ enum StorageRequest {
     /// This will always grab the latest state after any new updates, as it
     /// serializes through the `StorageManager` task after all prior requests.
     /// This serialization is particularly useful for tests.
-    GetLatestResources(oneshot::Sender<AllDisks>),
+    GetLatestResources(DebugIgnore<oneshot::Sender<AllDisks>>),
 
     /// Get the internal task state of the manager
-    GetManagerState(oneshot::Sender<StorageManagerData>),
+    GetManagerState(DebugIgnore<oneshot::Sender<StorageManagerData>>),
 }
 
 /// Data managed internally to the StorageManagerTask that can be useful
@@ -129,17 +142,41 @@ pub struct StorageHandle {
 
 impl StorageHandle {
     /// Adds a disk and associated zpool to the storage manager.
-    pub async fn detected_raw_disk(&self, disk: RawDisk) {
-        self.tx.send(StorageRequest::DetectedRawDisk(disk)).await.unwrap();
+    ///
+    /// Returns a future which completes once the notification has been
+    /// processed. Awaiting this future is optional.
+    pub async fn detected_raw_disk(
+        &self,
+        raw_disk: RawDisk,
+    ) -> impl Future<Output = Result<(), Error>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(StorageRequest::DetectedRawDisk { raw_disk, tx: tx.into() })
+            .await
+            .unwrap();
+
+        rx.map(|result| result.unwrap())
     }
 
     /// Removes a disk, if it's tracked by the storage manager, as well
     /// as any associated zpools.
-    pub async fn detected_raw_disk_removal(&self, disk: RawDisk) {
+    ///
+    /// Returns a future which completes once the notification has been
+    /// processed. Awaiting this future is optional.
+    pub async fn detected_raw_disk_removal(
+        &self,
+        raw_disk: RawDisk,
+    ) -> impl Future<Output = Result<(), Error>> {
+        let (tx, rx) = oneshot::channel();
         self.tx
-            .send(StorageRequest::DetectedRawDiskRemoval(disk))
+            .send(StorageRequest::DetectedRawDiskRemoval {
+                raw_disk,
+                tx: tx.into(),
+            })
             .await
             .unwrap();
+
+        rx.map(|result| result.unwrap())
     }
 
     /// Ensures that the storage manager tracks exactly the provided disks.
@@ -149,14 +186,25 @@ impl StorageHandle {
     ///
     /// If errors occur, an arbitrary "one" of them will be returned, but a
     /// best-effort attempt to add all disks will still be attempted.
-    pub async fn ensure_using_exactly_these_disks<I>(&self, raw_disks: I)
+    ///
+    /// Returns a future which completes once the notification has been
+    /// processed. Awaiting this future is optional.
+    pub async fn ensure_using_exactly_these_disks<I>(
+        &self,
+        raw_disks: I,
+    ) -> impl Future<Output = Result<(), Error>>
     where
         I: IntoIterator<Item = RawDisk>,
     {
+        let (tx, rx) = oneshot::channel();
         self.tx
-            .send(StorageRequest::DisksChanged(raw_disks.into_iter().collect()))
+            .send(StorageRequest::DetectedRawDisksChanged {
+                raw_disks: raw_disks.into_iter().collect(),
+                tx: tx.into(),
+            })
             .await
             .unwrap();
+        rx.map(|result| result.unwrap())
     }
 
     pub async fn omicron_physical_disks_ensure(
@@ -165,7 +213,10 @@ impl StorageHandle {
     ) -> Result<DisksManagementResult, Error> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(StorageRequest::OmicronPhysicalDisksEnsure { config, tx })
+            .send(StorageRequest::OmicronPhysicalDisksEnsure {
+                config,
+                tx: tx.into(),
+            })
             .await
             .unwrap();
 
@@ -187,15 +238,18 @@ impl StorageHandle {
 
     /// Wait for a boot disk to be initialized
     pub async fn wait_for_boot_disk(&mut self) -> (DiskIdentity, ZpoolName) {
+        // We create a distinct receiver to avoid colliding with
+        // the receiver used by [Self::wait_for_changes].
+        let mut receiver = self.disk_updates.clone();
         loop {
-            let resources = self.disk_updates.borrow_and_update();
+            let resources = receiver.borrow_and_update();
             if let Some((disk_id, zpool_name)) = resources.boot_disk() {
                 return (disk_id, zpool_name);
             }
             drop(resources);
             // We panic if the sender is dropped, as this means
             // the StorageManager has gone away, which it should not do.
-            self.disk_updates.changed().await.unwrap();
+            receiver.changed().await.unwrap();
         }
     }
 
@@ -207,16 +261,19 @@ impl StorageHandle {
 
     /// Retrieve the latest value of `AllDisks` from the
     /// `StorageManager` task.
-    pub async fn get_latest_resources(&self) -> AllDisks {
+    pub async fn get_latest_disks(&self) -> AllDisks {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(StorageRequest::GetLatestResources(tx)).await.unwrap();
+        self.tx
+            .send(StorageRequest::GetLatestResources(tx.into()))
+            .await
+            .unwrap();
         rx.await.unwrap()
     }
 
     /// Return internal data useful for debugging and testing
     pub async fn get_manager_state(&self) -> StorageManagerData {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(StorageRequest::GetManagerState(tx)).await.unwrap();
+        self.tx.send(StorageRequest::GetManagerState(tx.into())).await.unwrap();
         rx.await.unwrap()
     }
 
@@ -226,8 +283,11 @@ impl StorageHandle {
         dataset_name: DatasetName,
     ) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        let request =
-            NewFilesystemRequest { dataset_id, dataset_name, responder: tx };
+        let request = NewFilesystemRequest {
+            dataset_id,
+            dataset_name,
+            responder: tx.into(),
+        };
         self.tx.send(StorageRequest::NewFilesystem(request)).await.unwrap();
         rx.await.unwrap()
     }
@@ -252,7 +312,8 @@ impl FakeStorageManager {
             &log,
             HardcodedSecretRetriever::default(),
         );
-        let resources = StorageResources::new(log, key_requester);
+        let resources =
+            StorageResources::new(log, MountConfig::default(), key_requester);
         let disk_updates = resources.watch_disks();
         (
             Self { rx, _key_manager, resources },
@@ -266,11 +327,12 @@ impl FakeStorageManager {
     pub async fn run(mut self) {
         loop {
             match self.rx.recv().await {
-                Some(StorageRequest::DetectedRawDisk(raw_disk)) => {
-                    self.detected_disk(raw_disk);
+                Some(StorageRequest::DetectedRawDisk { raw_disk, tx }) => {
+                    self.detected_raw_disk(raw_disk);
+                    let _ = tx.0.send(Ok(()));
                 }
                 Some(StorageRequest::GetLatestResources(tx)) => {
-                    let _ = tx.send(self.resources.disks().clone());
+                    let _ = tx.0.send(self.resources.disks().clone());
                 }
                 Some(_) => {
                     unreachable!();
@@ -281,18 +343,16 @@ impl FakeStorageManager {
     }
 
     // Add a disk to `StorageResources` if it is new and return true if so
-    fn detected_disk(&mut self, raw_disk: RawDisk) {
-        let disk = match raw_disk {
+    fn detected_raw_disk(&mut self, raw_disk: RawDisk) {
+        match &raw_disk {
             RawDisk::Real(_) => {
                 panic!(
                     "Only synthetic disks can be used with `FakeStorageManager`"
                 );
             }
-            RawDisk::Synthetic(synthetic_disk) => {
-                crate::disk::Disk::Synthetic(synthetic_disk)
-            }
+            RawDisk::Synthetic(_) => (),
         };
-        self.resources.insert_fake_disk(disk);
+        self.resources.insert_raw_disk(raw_disk);
     }
 }
 
@@ -309,10 +369,11 @@ pub struct StorageManager {
 impl StorageManager {
     pub fn new(
         log: &Logger,
+        mount_config: MountConfig,
         key_requester: StorageKeyRequester,
     ) -> (StorageManager, StorageHandle) {
         let (tx, rx) = mpsc::channel(QUEUE_SIZE);
-        let resources = StorageResources::new(log, key_requester);
+        let resources = StorageResources::new(log, mount_config, key_requester);
         let disk_updates = resources.watch_disks();
         (
             StorageManager {
@@ -329,19 +390,29 @@ impl StorageManager {
     ///
     /// This should be spawned into a tokio task
     pub async fn run(mut self) {
+        const QUEUED_DISK_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+        let mut interval = interval(QUEUED_DISK_RETRY_TIMEOUT);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        tokio::pin!(interval);
+
         loop {
-            const QUEUED_DISK_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
-            let mut interval = interval(QUEUED_DISK_RETRY_TIMEOUT);
-            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
             tokio::select! {
-                res = self.step() => {
-                    if let Err(e) = res {
+                Some(req) = self.rx.recv() => {
+                    // It's critical that we don't "step" directly in the select
+                    // branch, as that could cancel an ongoing request if it
+                    // fires while a request is being processed.
+                    //
+                    // Instead, if we receive any request, we stop
+                    // "select!"-ing and fully process the request before
+                    // continuing.
+                    if let Err(e) = self.step(req).await {
                         warn!(self.log, "{e}");
                     }
                 }
                 _ = interval.tick(),
                     if self.state == StorageManagerState::SynchronizationNeeded =>
                 {
+                    info!(self.log, "automatically managing disks");
                     self.manage_disks().await;
                 }
             }
@@ -351,40 +422,44 @@ impl StorageManager {
     /// Process the next event
     ///
     /// This is useful for testing/debugging
-    pub async fn step(&mut self) -> Result<(), Error> {
-        // The sending side never disappears because we hold a copy
-        let req = self.rx.recv().await.unwrap();
+    async fn step(&mut self, req: StorageRequest) -> Result<(), Error> {
         info!(self.log, "Received {:?}", req);
 
         match req {
-            StorageRequest::DetectedRawDisk(raw_disk) => {
-                self.detected_disk(raw_disk).await?;
+            StorageRequest::DetectedRawDisk { raw_disk, tx } => {
+                let result = self.detected_raw_disk(raw_disk).await;
+                if let Err(ref err) = &result {
+                    warn!(self.log, "Failed to add raw disk"; "err" => ?err);
+                }
+                let _ = tx.0.send(result);
             }
-            StorageRequest::DetectedRawDiskRemoval(raw_disk) => {
-                self.detected_disk_removal(raw_disk);
+            StorageRequest::DetectedRawDiskRemoval { raw_disk, tx } => {
+                self.detected_raw_disk_removal(raw_disk);
+                let _ = tx.0.send(Ok(()));
             }
-            StorageRequest::DisksChanged(raw_disks) => {
+            StorageRequest::DetectedRawDisksChanged { raw_disks, tx } => {
                 self.ensure_using_exactly_these_disks(raw_disks).await;
+                let _ = tx.0.send(Ok(()));
             }
             StorageRequest::OmicronPhysicalDisksEnsure { config, tx } => {
                 let _ =
-                    tx.send(self.omicron_physical_disks_ensure(config).await);
+                    tx.0.send(self.omicron_physical_disks_ensure(config).await);
             }
             StorageRequest::NewFilesystem(request) => {
                 let result = self.add_dataset(&request).await;
                 if let Err(ref err) = &result {
                     warn!(self.log, "Failed to add dataset"; "err" => ?err);
                 }
-                let _ = request.responder.send(result);
+                let _ = request.responder.0.send(result);
             }
             StorageRequest::KeyManagerReady => {
-                self.set_key_manager_ready().await?;
+                self.key_manager_ready().await?;
             }
             StorageRequest::GetLatestResources(tx) => {
-                let _ = tx.send(self.resources.disks().clone());
+                let _ = tx.0.send(self.resources.disks().clone());
             }
             StorageRequest::GetManagerState(tx) => {
-                let _ = tx.send(StorageManagerData { state: self.state });
+                let _ = tx.0.send(StorageManagerData { state: self.state });
             }
         };
 
@@ -437,7 +512,10 @@ impl StorageManager {
     // For U.2s: we update our inventory.
     // For M.2s: we do the same, but also begin "managing" the disk so
     // it can automatically be in-use.
-    async fn detected_disk(&mut self, raw_disk: RawDisk) -> Result<(), Error> {
+    async fn detected_raw_disk(
+        &mut self,
+        raw_disk: RawDisk,
+    ) -> Result<(), Error> {
         let needs_synchronization =
             matches!(raw_disk.variant(), DiskVariant::U2);
         self.resources.insert_disk(raw_disk).await?;
@@ -471,7 +549,7 @@ impl StorageManager {
         }
     }
 
-    async fn set_key_manager_ready(&mut self) -> Result<(), Error> {
+    async fn key_manager_ready(&mut self) -> Result<(), Error> {
         // Now that we're actually able to unpack U.2s, attempt to load the
         // set of disks which we previously stored in the ledger, if one
         // existed.
@@ -568,7 +646,7 @@ impl StorageManager {
         log: &Logger,
         config: &OmicronPhysicalDisksConfig,
     ) -> Result<DisksManagementResult, Error> {
-        if self.state != StorageManagerState::Synchronized {
+        if self.state == StorageManagerState::WaitingForKeyManager {
             warn!(
                 log,
                 "Not ready to manage storage yet (waiting for the key manager)"
@@ -587,7 +665,7 @@ impl StorageManager {
     }
 
     // Delete a real disk and return `true` if the disk was actually removed
-    fn detected_disk_removal(&mut self, raw_disk: RawDisk) {
+    fn detected_raw_disk_removal(&mut self, raw_disk: RawDisk) {
         self.resources.remove_disk(raw_disk.identity());
     }
 
@@ -622,7 +700,7 @@ impl StorageManager {
 
         for raw_disk in raw_disks {
             let disk_id = raw_disk.identity().clone();
-            if let Err(err) = self.detected_disk(raw_disk).await {
+            if let Err(err) = self.detected_raw_disk(raw_disk).await {
                 warn!(
                     self.log,
                     "Failed to add disk to storage resources: {err}";
@@ -637,7 +715,7 @@ impl StorageManager {
         &mut self,
         request: &NewFilesystemRequest,
     ) -> Result<(), Error> {
-        info!(self.log, "add_dataset: {:?}", request);
+        info!(self.log, "add_dataset"; "request" => ?request);
         if !self
             .resources
             .disks()
@@ -689,13 +767,13 @@ impl StorageManager {
 
 /// A [`key-manager::SecretRetriever`] that only returns hardcoded IKM for
 /// epoch 0
-#[cfg(feature = "testing")]
+#[cfg(any(feature = "testing", test))]
 #[derive(Debug, Default)]
 struct HardcodedSecretRetriever {
     inject_error: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[cfg(feature = "testing")]
+#[cfg(any(feature = "testing", test))]
 #[async_trait::async_trait]
 impl key_manager::SecretRetriever for HardcodedSecretRetriever {
     async fn get_latest(
@@ -733,195 +811,471 @@ impl key_manager::SecretRetriever for HardcodedSecretRetriever {
     }
 }
 
+/// A helper utility for tests that want to use a StorageManager.
+///
+/// Attempts to make it easy to create a set of vdev-based M.2 and U.2
+/// devices, which can be formatted with arbitrary zpools.
+#[cfg(any(feature = "testing", test))]
+pub struct StorageManagerTestHarness {
+    handle: StorageHandle,
+    vdev_dir: camino_tempfile::Utf8TempDir,
+    vdevs: std::collections::HashSet<RawDisk>,
+    key_manager_error_injector: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    key_manager_task: tokio::task::JoinHandle<()>,
+    storage_manager_task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(any(feature = "testing", test))]
+impl StorageManagerTestHarness {
+    /// Creates a new StorageManagerTestHarness with no associated disks.
+    pub async fn new(log: &Logger) -> Self {
+        illumos_utils::USE_MOCKS
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let tmp = camino_tempfile::tempdir()
+            .expect("Failed to make temporary directory");
+        info!(log, "Using tmp: {}", tmp.path());
+        Self::new_with_tmp_dir(log, tmp).await
+    }
+
+    async fn new_with_tmp_dir(
+        log: &Logger,
+        tmp: camino_tempfile::Utf8TempDir,
+    ) -> Self {
+        let mount_config = MountConfig { root: tmp.path().into() };
+
+        let key_manager_error_injector =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mut key_manager, key_requester) = key_manager::KeyManager::new(
+            &log,
+            HardcodedSecretRetriever {
+                inject_error: key_manager_error_injector.clone(),
+            },
+        );
+        let (manager, handle) =
+            StorageManager::new(&log, mount_config, key_requester);
+
+        // Spawn the key_manager so that it will respond to requests for encryption keys
+        let key_manager_task =
+            tokio::spawn(async move { key_manager.run().await });
+
+        // Spawn the storage manager as done by sled-agent
+        let storage_manager_task = tokio::spawn(async move {
+            manager.run().await;
+        });
+
+        Self {
+            handle,
+            vdev_dir: tmp,
+            vdevs: std::collections::HashSet::new(),
+            key_manager_error_injector,
+            key_manager_task,
+            storage_manager_task,
+        }
+    }
+
+    /// Emulate a system rebooting.
+    ///
+    /// - Stops the currently running tasks and restarts them
+    /// - Re-inserts all vdevs previously created by [Self::add_vdevs].
+    pub async fn reboot(self, log: &Logger) -> Self {
+        // Deconstruct the test harness
+        let StorageManagerTestHarness {
+            vdev_dir,
+            vdevs,
+            key_manager_task,
+            storage_manager_task,
+            ..
+        } = self;
+
+        // Abort ongoing tasks, in lieu of a cleaner shutdown mechanism.
+        key_manager_task.abort();
+        storage_manager_task.abort();
+
+        // Re-create all the state we created during the constructor, but
+        // leave the temporary directory as it was "before reboot".
+        let mut slef = Self::new_with_tmp_dir(log, vdev_dir).await;
+
+        // Notify ourselves of the new disks, just as the hardware would.
+        //
+        // NOTE: Technically, if these disks have pools, they're still imported.
+        // However, the SledManager doesn't know about them, and wouldn't
+        // assume they're being managed right now.
+        for raw_disk in vdevs {
+            slef.handle
+                .detected_raw_disk(raw_disk.clone())
+                .await // Notify StorageManager
+                .await // Wait for it to finish processing
+                .unwrap();
+            slef.vdevs.insert(raw_disk.clone());
+        }
+
+        slef
+    }
+
+    /// Adds raw devices to the [crate::manager::StorageManager], as if they were detected via
+    /// hardware. Can be called several times.
+    pub async fn add_vdevs<P: AsRef<str> + ?Sized>(
+        &mut self,
+        vdevs: &[&P],
+    ) -> Vec<RawDisk> {
+        let mut added = vec![];
+        for vdev in vdevs.iter().map(|vdev| Utf8PathBuf::from(vdev.as_ref())) {
+            assert!(vdev.is_relative());
+            let vdev_path = self.vdev_dir.path().join(&vdev);
+            let raw_disk: RawDisk =
+                crate::disk::RawSyntheticDisk::new_with_length(
+                    &vdev_path,
+                    1 << 30,
+                )
+                .expect(&format!("Failed to create synthetic disk for {vdev}"))
+                .into();
+            self.handle
+                .detected_raw_disk(raw_disk.clone())
+                .await // Notify StorageManager
+                .await // Wait for it to finish processing
+                .unwrap();
+
+            self.vdevs.insert(raw_disk.clone());
+            added.push(raw_disk);
+        }
+        added
+    }
+
+    /// Helper function to destroy all zpools
+    pub async fn cleanup(mut self) {
+        let disks = self.handle().get_latest_disks().await;
+        let pools = disks.get_all_zpools();
+        for (pool, _) in pools {
+            illumos_utils::zpool::Zpool::destroy(&pool)
+                .expect("Failed to destroy zpool");
+        }
+
+        // Stop the harness, other than the temporary directory.
+        let StorageManagerTestHarness { vdev_dir, .. } = self;
+
+        // Make sure that we're actually able to delete everything within the
+        // temporary directory.
+        //
+        // This is necessary because the act of mounting datasets within this
+        // directory may have created directories owned by root, and the test
+        // process may not have been started as root.
+        //
+        // Since we're about to delete all these files anyway, make them
+        // accessible to everyone before destroying them.
+        let mut command = std::process::Command::new("/usr/bin/pfexec");
+        let mount = vdev_dir.path();
+        let cmd = command.args(["chmod", "-R", "a+rw", mount.as_str()]);
+        cmd.output().expect(
+            "Failed to change ownership of the temporary directory we're trying to delete"
+        );
+
+        // Actually delete everything, and check the result to fail loud if
+        // something goes wrong.
+        vdev_dir.close().expect("Failed to clean up temporary directory");
+    }
+
+    pub fn make_config(
+        &self,
+        generation: u32,
+        disks: &[RawDisk],
+    ) -> OmicronPhysicalDisksConfig {
+        let disks = disks
+            .into_iter()
+            .map(|raw| {
+                let identity = raw.identity();
+
+                crate::disk::OmicronPhysicalDiskConfig {
+                    identity: identity.clone(),
+                    id: Uuid::new_v4(),
+                    pool_id: Uuid::new_v4(),
+                }
+            })
+            .collect();
+
+        OmicronPhysicalDisksConfig {
+            generation: omicron_common::api::external::Generation::from(
+                generation,
+            ),
+            disks,
+        }
+    }
+
+    /// Returns the underlying [crate::manager::StorageHandle].
+    pub fn handle(&mut self) -> &mut StorageHandle {
+        &mut self.handle
+    }
+
+    /// Set to "true" to throw errors, "false" to not inject errors.
+    pub fn key_manager_error_injector(
+        &self,
+    ) -> &std::sync::Arc<std::sync::atomic::AtomicBool> {
+        &self.key_manager_error_injector
+    }
+}
+
 /// All tests only use synthetic disks, but are expected to be run on illumos
 /// systems.
 #[cfg(all(test, target_os = "illumos"))]
 mod tests {
     use crate::dataset::DatasetKind;
-    use crate::disk::SyntheticDisk;
+    use crate::disk::RawSyntheticDisk;
+    use crate::resources::DiskManagementError;
 
     use super::*;
-    use async_trait::async_trait;
     use camino_tempfile::tempdir;
-    use illumos_utils::zpool::Zpool;
-    use key_manager::{
-        KeyManager, SecretRetriever, SecretRetrieverError, SecretState,
-        VersionedIkm,
-    };
+    use omicron_common::ledger;
     use omicron_test_utils::dev::test_setup_log;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
+    use std::sync::atomic::Ordering;
     use uuid::Uuid;
 
     #[tokio::test]
-    async fn add_u2_disk_while_not_in_normal_stage_and_ensure_it_gets_queued() {
+    async fn add_control_plane_disks_requires_keymanager() {
+        illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
+        let logctx =
+            test_setup_log("add_control_plane_disks_requires_keymanager");
+
+        let mut harness = StorageManagerTestHarness::new(&logctx.log).await;
+        let raw_disks =
+            harness.add_vdevs(&["u2_under_test.vdev", "m2_helping.vdev"]).await;
+
+        // This disks should exist, but only the M.2 should have a zpool.
+        let all_disks = harness.handle().get_latest_disks().await;
+        assert_eq!(2, all_disks.iter_all().collect::<Vec<_>>().len());
+        assert_eq!(0, all_disks.all_u2_zpools().len());
+        assert_eq!(1, all_disks.all_m2_zpools().len());
+
+        // If we try to "act like nexus" and request a control-plane disk, we'll
+        // see a failure because the key manager isn't ready.
+        let config = harness.make_config(1, &raw_disks);
+        let result = harness
+            .handle()
+            .omicron_physical_disks_ensure(config.clone())
+            .await;
+        assert!(matches!(result, Err(Error::KeyManagerNotReady)));
+
+        // If we make the key manager ready and try again, it'll work.
+        harness.handle().key_manager_ready().await;
+        let result = harness
+            .handle()
+            .omicron_physical_disks_ensure(config.clone())
+            .await
+            .expect("Ensuring disks should work after key manager is ready");
+        assert!(!result.has_error(), "{:?}", result);
+
+        // If we look at the disks again, we'll now see one U.2 zpool.
+        let all_disks = harness.handle().get_latest_disks().await;
+        assert_eq!(2, all_disks.iter_all().collect::<Vec<_>>().len());
+        assert_eq!(1, all_disks.all_u2_zpools().len());
+        assert_eq!(1, all_disks.all_m2_zpools().len());
+
+        harness.cleanup().await;
+        logctx.cleanup_successful();
+    }
+
+    #[tokio::test]
+    async fn ledger_writes_require_at_least_one_m2() {
+        let logctx = test_setup_log("ledger_writes_require_at_least_one_m2");
+
+        // Create a single U.2 under test, with a ready-to-go key manager.
+        let mut harness = StorageManagerTestHarness::new(&logctx.log).await;
+        let raw_disks = harness.add_vdevs(&["u2_under_test.vdev"]).await;
+        harness.handle().key_manager_ready().await;
+        let config = harness.make_config(1, &raw_disks);
+
+        // Attempting to adopt this U.2 fails (we don't have anywhere to put the
+        // ledger).
+        let result = harness
+            .handle()
+            .omicron_physical_disks_ensure(config.clone())
+            .await;
+        assert!(matches!(
+            result,
+            Err(Error::Ledger(ledger::Error::FailedToWrite { .. }))
+        ));
+
+        // Add an M.2 which can store the ledger.
+        let _raw_disks =
+            harness.add_vdevs(&["m2_finally_showed_up.vdev"]).await;
+        harness.handle().wait_for_boot_disk().await;
+
+        let result = harness
+            .handle()
+            .omicron_physical_disks_ensure(config.clone())
+            .await
+            .expect("After adding an M.2, the ledger write should have worked");
+        assert!(!result.has_error(), "{:?}", result);
+
+        // Wait for the add disk notification
+        let all_disks = harness.handle().wait_for_changes().await;
+        assert_eq!(all_disks.all_u2_zpools().len(), 1);
+        assert_eq!(all_disks.all_m2_zpools().len(), 1);
+
+        harness.cleanup().await;
+        logctx.cleanup_successful();
+    }
+
+    #[tokio::test]
+    async fn add_raw_u2_does_not_create_zpool() {
+        illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
+        let logctx = test_setup_log("add_raw_u2_does_not_create_zpool");
+        let mut harness = StorageManagerTestHarness::new(&logctx.log).await;
+        harness.handle().key_manager_ready().await;
+
+        // Add a representative scenario for a small sled: a U.2 and M.2.
+        let _raw_disks =
+            harness.add_vdevs(&["u2_under_test.vdev", "m2_helping.vdev"]).await;
+
+        // This disks should exist, but only the M.2 should have a zpool.
+        let all_disks = harness.handle().get_latest_disks().await;
+        assert_eq!(2, all_disks.iter_all().collect::<Vec<_>>().len());
+        assert_eq!(0, all_disks.all_u2_zpools().len());
+        assert_eq!(1, all_disks.all_m2_zpools().len());
+
+        harness.cleanup().await;
+        logctx.cleanup_successful();
+    }
+
+    #[tokio::test]
+    async fn wait_for_boot_disk() {
+        illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
+        let logctx = test_setup_log("wait_for_boot_disk");
+        let mut harness = StorageManagerTestHarness::new(&logctx.log).await;
+        let _raw_disks = harness.add_vdevs(&["u2_under_test.vdev"]).await;
+
+        // When we wait for changes, we can see the U.2 being added, but no boot
+        // disk.
+        let all_disks = harness.handle().wait_for_changes().await;
+        assert_eq!(1, all_disks.iter_all().collect::<Vec<_>>().len());
+        assert!(all_disks.boot_disk().is_none());
+
+        // Waiting for the boot disk should time out.
+        assert!(tokio::time::timeout(
+            tokio::time::Duration::from_millis(10),
+            harness.handle().wait_for_boot_disk(),
+        )
+        .await
+        .is_err());
+
+        // Now we add a boot disk.
+        let boot_disk = harness.add_vdevs(&["m2_under_test.vdev"]).await;
+
+        // It shows up through the general "wait for changes" API.
+        let all_disks = harness.handle().wait_for_changes().await;
+        assert_eq!(2, all_disks.iter_all().collect::<Vec<_>>().len());
+        assert!(all_disks.boot_disk().is_some());
+
+        // We can wait for, and see, the boot disk.
+        let (id, _) = harness.handle().wait_for_boot_disk().await;
+        assert_eq!(&id, boot_disk[0].identity());
+
+        // We can keep calling this function without blocking.
+        let (id, _) = harness.handle().wait_for_boot_disk().await;
+        assert_eq!(&id, boot_disk[0].identity());
+
+        harness.cleanup().await;
+        logctx.cleanup_successful();
+    }
+
+    #[tokio::test]
+    async fn disks_automatically_managed_after_key_manager_ready() {
         illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
         let logctx = test_setup_log(
-            "add_u2_disk_while_not_in_normal_stage_and_ensure_it_gets_queued",
+            "disks_automatically_managed_after_key_manager_ready",
         );
-        let (mut _key_manager, key_requester) =
-            KeyManager::new(&logctx.log, HardcodedSecretRetriever::default());
-        let (mut manager, _) = StorageManager::new(&logctx.log, key_requester);
-        let zpool_name = ZpoolName::new_external(Uuid::new_v4());
-        let raw_disk: RawDisk = SyntheticDisk::new(zpool_name).into();
-        assert_eq!(StorageManagerState::WaitingForKeyManager, manager.state);
-        manager.add_u2_disk(raw_disk.clone()).await.unwrap();
-        assert!(manager.resources.all_u2_zpools().is_empty());
-        assert_eq!(
-            manager.queued_manage_disk_requests,
-            HashSet::from([raw_disk.clone()])
-        );
+        let mut harness = StorageManagerTestHarness::new(&logctx.log).await;
 
-        // Check other non-normal stages and ensure disk gets queued
-        manager.queued_manage_disk_requests.clear();
-        manager.state = StorageManagerState::SynchronizationNeeded;
-        manager.add_u2_disk(raw_disk.clone()).await.unwrap();
-        assert!(manager.resources.all_u2_zpools().is_empty());
-        assert_eq!(
-            manager.queued_manage_disk_requests,
-            HashSet::from([raw_disk])
-        );
+        // Boot normally, add an M.2 and a U.2, and let them
+        // create pools.
+        let raw_disks =
+            harness.add_vdevs(&["u2_under_test.vdev", "m2_helping.vdev"]).await;
+        harness.handle().key_manager_ready().await;
+        let config = harness.make_config(1, &raw_disks);
+        let result = harness
+            .handle()
+            .omicron_physical_disks_ensure(config.clone())
+            .await
+            .unwrap();
+        assert!(!result.has_error(), "{:?}", result);
+
+        // Both pools exist
+        let all_disks = harness.handle().get_latest_disks().await;
+        assert_eq!(2, all_disks.iter_all().collect::<Vec<_>>().len());
+        assert_eq!(1, all_disks.all_u2_zpools().len());
+        assert_eq!(1, all_disks.all_m2_zpools().len());
+
+        // "reboot" the storage manager, and let is see the disks before
+        // the key manager is ready.
+        let mut harness = harness.reboot(&logctx.log).await;
+
+        // Both disks exist, but the U.2's pool is not yet accessible.
+        let all_disks = harness.handle().wait_for_changes().await;
+        assert_eq!(2, all_disks.iter_all().collect::<Vec<_>>().len());
+        assert_eq!(0, all_disks.all_u2_zpools().len());
+        assert_eq!(1, all_disks.all_m2_zpools().len());
+
+        // Mark the key manaager ready. This should eventually lead to the
+        // U.2 being managed, since it exists in the M.2 ledger.
+        harness.handle().key_manager_ready().await;
+        let all_disks = harness.handle().wait_for_changes().await;
+        assert_eq!(1, all_disks.all_u2_zpools().len());
+
+        harness.cleanup().await;
         logctx.cleanup_successful();
     }
 
-    #[tokio::test]
-    async fn ensure_u2_gets_added_to_resources() {
-        illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
-        let logctx = test_setup_log("ensure_u2_gets_added_to_resources");
-        let (mut key_manager, key_requester) =
-            KeyManager::new(&logctx.log, HardcodedSecretRetriever::default());
-        let (mut manager, _) = StorageManager::new(&logctx.log, key_requester);
-        let zpool_name = ZpoolName::new_external(Uuid::new_v4());
-        let dir = tempdir().unwrap();
-        let disk = SyntheticDisk::create_zpool(dir.path(), &zpool_name).into();
-
-        // Spawn the key_manager so that it will respond to requests for encryption keys
-        tokio::spawn(async move { key_manager.run().await });
-
-        // Set the stage to pretend we've progressed enough to have a key_manager available.
-        manager.state = StorageManagerState::Synchronized;
-        manager.add_u2_disk(disk).await.unwrap();
-        assert_eq!(manager.resources.all_u2_zpools().len(), 1);
-        Zpool::destroy(&zpool_name).unwrap();
-        logctx.cleanup_successful();
-    }
-
-    #[tokio::test]
-    async fn wait_for_bootdisk() {
-        illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
-        let logctx = test_setup_log("wait_for_bootdisk");
-        let (mut key_manager, key_requester) =
-            KeyManager::new(&logctx.log, HardcodedSecretRetriever::default());
-        let (manager, mut handle) =
-            StorageManager::new(&logctx.log, key_requester);
-        // Spawn the key_manager so that it will respond to requests for encryption keys
-        tokio::spawn(async move { key_manager.run().await });
-
-        // Spawn the storage manager as done by sled-agent
-        tokio::spawn(async move {
-            manager.run().await;
-        });
-
-        // Create a synthetic internal disk
-        let zpool_name = ZpoolName::new_internal(Uuid::new_v4());
-        let dir = tempdir().unwrap();
-        let disk = SyntheticDisk::create_zpool(dir.path(), &zpool_name).into();
-
-        handle.detected_raw_disk(disk).await;
-        handle.wait_for_boot_disk().await;
-        Zpool::destroy(&zpool_name).unwrap();
-        logctx.cleanup_successful();
-    }
-
-    #[tokio::test]
-    async fn queued_disks_get_added_as_resources() {
-        illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
-        let logctx = test_setup_log("queued_disks_get_added_as_resources");
-        let (mut key_manager, key_requester) =
-            KeyManager::new(&logctx.log, HardcodedSecretRetriever::default());
-        let (manager, handle) = StorageManager::new(&logctx.log, key_requester);
-
-        // Spawn the key_manager so that it will respond to requests for encryption keys
-        tokio::spawn(async move { key_manager.run().await });
-
-        // Spawn the storage manager as done by sled-agent
-        tokio::spawn(async move {
-            manager.run().await;
-        });
-
-        // Queue up a disks, as we haven't told the `StorageManager` that
-        // the `KeyManager` is ready yet.
-        let zpool_name = ZpoolName::new_external(Uuid::new_v4());
-        let dir = tempdir().unwrap();
-        let disk = SyntheticDisk::create_zpool(dir.path(), &zpool_name).into();
-        handle.detected_raw_disk(disk).await;
-        let resources = handle.get_latest_resources().await;
-        assert!(resources.all_u2_zpools().is_empty());
-
-        // Now inform the storage manager that the key manager is ready
-        // The queued disk should be successfully added
-        handle.key_manager_ready().await;
-        let resources = handle.get_latest_resources().await;
-        assert_eq!(resources.all_u2_zpools().len(), 1);
-        Zpool::destroy(&zpool_name).unwrap();
-        logctx.cleanup_successful();
-    }
-
-    /// For this test, we are going to step through the msg recv loop directly
-    /// without running the `StorageManager` in a tokio task.
-    /// This allows us to control timing precisely.
     #[tokio::test]
     async fn queued_disks_get_requeued_on_secret_retriever_error() {
         illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
         let logctx = test_setup_log(
             "queued_disks_get_requeued_on_secret_retriever_error",
         );
-        let inject_error = Arc::new(AtomicBool::new(false));
-        let (mut key_manager, key_requester) = KeyManager::new(
-            &logctx.log,
-            HardcodedSecretRetriever { inject_error: inject_error.clone() },
-        );
-        let (mut manager, handle) =
-            StorageManager::new(&logctx.log, key_requester);
-
-        // Spawn the key_manager so that it will respond to requests for encryption keys
-        tokio::spawn(async move { key_manager.run().await });
+        let mut harness = StorageManagerTestHarness::new(&logctx.log).await;
 
         // Queue up a disks, as we haven't told the `StorageManager` that
         // the `KeyManager` is ready yet.
-        let zpool_name = ZpoolName::new_external(Uuid::new_v4());
-        let dir = tempdir().unwrap();
-        let disk = SyntheticDisk::create_zpool(dir.path(), &zpool_name).into();
-        handle.detected_raw_disk(disk).await;
-        manager.step().await.unwrap();
+        let raw_disks =
+            harness.add_vdevs(&["u2_under_test.vdev", "m2_helping.vdev"]).await;
+        let config = harness.make_config(1, &raw_disks);
+        let result = harness
+            .handle()
+            .omicron_physical_disks_ensure(config.clone())
+            .await;
+        assert!(matches!(result, Err(Error::KeyManagerNotReady)));
 
-        // We can't wait for a reply through the handle as the storage manager task
-        // isn't actually running. We just check the resources directly.
-        assert!(manager.resources.all_u2_zpools().is_empty());
+        // As usual, the U.2 isn't ready yet.
+        let all_disks = harness.handle().get_latest_disks().await;
+        assert_eq!(2, all_disks.iter_all().collect::<Vec<_>>().len());
+        assert_eq!(0, all_disks.all_u2_zpools().len());
 
-        // Let's inject an error to the `SecretRetriever` to simulate a trust
-        // quorum timeout
-        inject_error.store(true, Ordering::SeqCst);
+        // Mark the key manager ready, but throwing errors.
+        harness.key_manager_error_injector().store(true, Ordering::SeqCst);
+        harness.handle().key_manager_ready().await;
 
-        // Now inform the storage manager that the key manager is ready
-        // The queued disk should not be added due to the error
-        handle.key_manager_ready().await;
-        manager.step().await.unwrap();
-        assert!(manager.resources.all_u2_zpools().is_empty());
+        let result = harness
+            .handle()
+            .omicron_physical_disks_ensure(config.clone())
+            .await
+            .unwrap();
+        assert!(result.has_error());
+        assert!(matches!(
+            result.status[0].result.as_ref(),
+            Err(DiskManagementError::KeyManager(_))
+        ));
+        let all_disks = harness.handle().get_latest_disks().await;
+        assert_eq!(0, all_disks.all_u2_zpools().len());
 
-        // Manually simulating a timer tick to add queued disks should also
-        // still hit the error
-        manager.add_queued_disks().await;
-        assert!(manager.resources.all_u2_zpools().is_empty());
+        // After toggling KeyManager errors off, the U.2 can be successfully added.
+        harness.key_manager_error_injector().store(false, Ordering::SeqCst);
+        let result = harness
+            .handle()
+            .omicron_physical_disks_ensure(config.clone())
+            .await
+            .expect("Ensuring control plane disks should have worked");
+        assert!(!result.has_error(), "{:?}", result);
+        let all_disks = harness.handle().get_latest_disks().await;
+        assert_eq!(1, all_disks.all_u2_zpools().len());
 
-        // Clearing the injected error will cause the disk to get added
-        inject_error.store(false, Ordering::SeqCst);
-        manager.add_queued_disks().await;
-        assert_eq!(1, manager.resources.all_u2_zpools().len());
-
-        Zpool::destroy(&zpool_name).unwrap();
+        harness.cleanup().await;
         logctx.cleanup_successful();
     }
 
@@ -930,40 +1284,25 @@ mod tests {
         illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
         let logctx =
             test_setup_log("detected_raw_disk_removal_triggers_notification");
-        let (mut key_manager, key_requester) =
-            KeyManager::new(&logctx.log, HardcodedSecretRetriever::default());
-        let (manager, mut handle) =
-            StorageManager::new(&logctx.log, key_requester);
+        let mut harness = StorageManagerTestHarness::new(&logctx.log).await;
+        harness.handle().key_manager_ready().await;
+        let mut raw_disks = harness.add_vdevs(&["u2_under_test.vdev"]).await;
 
-        // Spawn the key_manager so that it will respond to requests for encryption keys
-        tokio::spawn(async move { key_manager.run().await });
-
-        // Spawn the storage manager as done by sled-agent
-        tokio::spawn(async move {
-            manager.run().await;
-        });
-
-        // Inform the storage manager that the key manager is ready, so disks
-        // don't get queued
-        handle.key_manager_ready().await;
-
-        // Create and add a disk
-        let zpool_name = ZpoolName::new_external(Uuid::new_v4());
-        let dir = tempdir().unwrap();
-        let disk: RawDisk =
-            SyntheticDisk::create_zpool(dir.path(), &zpool_name).into();
-        handle.detected_raw_disk(disk.clone()).await;
-
-        // Wait for the add disk notification
-        let resources = handle.wait_for_changes().await;
-        assert_eq!(resources.all_u2_zpools().len(), 1);
+        // Access the add disk notification
+        let all_disks = harness.handle().wait_for_changes().await;
+        assert_eq!(1, all_disks.iter_all().collect::<Vec<_>>().len());
 
         // Delete the disk and wait for a notification
-        handle.detected_raw_disk_removal(disk).await;
-        let resources = handle.wait_for_changes().await;
-        assert!(resources.all_u2_zpools().is_empty());
+        harness
+            .handle()
+            .detected_raw_disk_removal(raw_disks.remove(0))
+            .await
+            .await
+            .unwrap();
+        let all_disks = harness.handle().wait_for_changes().await;
+        assert_eq!(0, all_disks.iter_all().collect::<Vec<_>>().len());
 
-        Zpool::destroy(&zpool_name).unwrap();
+        harness.cleanup().await;
         logctx.cleanup_successful();
     }
 
@@ -971,116 +1310,81 @@ mod tests {
     async fn ensure_using_exactly_these_disks() {
         illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
         let logctx = test_setup_log("ensure_using_exactly_these_disks");
-        let (mut key_manager, key_requester) =
-            KeyManager::new(&logctx.log, HardcodedSecretRetriever::default());
-        let (manager, mut handle) =
-            StorageManager::new(&logctx.log, key_requester);
+        let mut harness = StorageManagerTestHarness::new(&logctx.log).await;
 
-        // Spawn the key_manager so that it will respond to requests for encryption keys
-        tokio::spawn(async move { key_manager.run().await });
-
-        // Spawn the storage manager as done by sled-agent
-        tokio::spawn(async move {
-            manager.run().await;
-        });
-
-        // Create a bunch of file backed external disks with zpools
-        let dir = tempdir().unwrap();
-        let zpools: Vec<ZpoolName> =
-            (0..10).map(|_| ZpoolName::new_external(Uuid::new_v4())).collect();
-        let disks: Vec<RawDisk> = zpools
-            .iter()
-            .map(|zpool_name| {
-                SyntheticDisk::create_zpool(dir.path(), zpool_name).into()
+        // Create a bunch of file backed external disks
+        let vdev_dir = tempdir().unwrap();
+        let disks: Vec<RawDisk> = (0..10)
+            .map(|serial| {
+                let vdev_path =
+                    vdev_dir.path().join(format!("u2_{serial}.vdev"));
+                RawSyntheticDisk::new_with_length(&vdev_path, 1 << 30)
+                    .unwrap()
+                    .into()
             })
             .collect();
 
-        // Add the first 3 disks, and ensure they get queued, as we haven't
-        // marked our key manager ready yet
-        handle
+        // Observe the first three disks
+        harness
+            .handle()
             .ensure_using_exactly_these_disks(disks.iter().take(3).cloned())
-            .await;
-        let state = handle.get_manager_state().await;
-        assert_eq!(state.queued_manage_disk_requests.len(), 3);
-        assert_eq!(state.state, StorageManagerState::WaitingForKeyManager);
-        assert!(handle.get_latest_resources().await.all_u2_zpools().is_empty());
+            .await
+            .await
+            .unwrap();
 
-        // Mark the key manager ready and wait for the storage update
-        handle.key_manager_ready().await;
-        let resources = handle.wait_for_changes().await;
-        let expected: HashSet<_> =
-            disks.iter().take(3).map(|d| d.identity()).collect();
-        let actual: HashSet<_> = resources.disks().keys().collect();
-        assert_eq!(expected, actual);
+        let all_disks = harness.handle().get_latest_disks().await;
+        assert_eq!(3, all_disks.iter_all().collect::<Vec<_>>().len());
 
-        // Add first three disks after the initial one. The returned resources
+        // Add first three disks after the initial one. The returned disks
         // should not contain the first disk.
-        handle
+        harness
+            .handle()
             .ensure_using_exactly_these_disks(
                 disks.iter().skip(1).take(3).cloned(),
             )
-            .await;
-        let resources = handle.wait_for_changes().await;
+            .await
+            .await
+            .unwrap();
+
+        let all_disks = harness.handle().wait_for_changes().await;
+        assert_eq!(3, all_disks.iter_all().collect::<Vec<_>>().len());
+
         let expected: HashSet<_> =
             disks.iter().skip(1).take(3).map(|d| d.identity()).collect();
-        let actual: HashSet<_> = resources.disks().keys().collect();
+        let actual: HashSet<_> = all_disks.values.keys().collect();
         assert_eq!(expected, actual);
 
         // Ensure the same set of disks and make sure no change occurs
-        // Note that we directly request the resources this time so we aren't
+        // Note that we directly request the disks this time so we aren't
         // waiting forever for a change notification.
-        handle
+        harness
+            .handle()
             .ensure_using_exactly_these_disks(
                 disks.iter().skip(1).take(3).cloned(),
             )
-            .await;
-        let resources2 = handle.get_latest_resources().await;
-        assert_eq!(resources, resources2);
+            .await
+            .await
+            .unwrap();
+        let all_disks2 = harness.handle().get_latest_disks().await;
+        assert_eq!(all_disks.values, all_disks2.values);
 
         // Add a disjoint set of disks and see that only they come through
-        handle
+        harness
+            .handle()
             .ensure_using_exactly_these_disks(
                 disks.iter().skip(4).take(5).cloned(),
             )
-            .await;
-        let resources = handle.wait_for_changes().await;
+            .await
+            .await
+            .unwrap();
+
+        let all_disks = harness.handle().get_latest_disks().await;
         let expected: HashSet<_> =
             disks.iter().skip(4).take(5).map(|d| d.identity()).collect();
-        let actual: HashSet<_> = resources.disks().keys().collect();
+        let actual: HashSet<_> = all_disks.values.keys().collect();
         assert_eq!(expected, actual);
 
-        // Finally, change the zpool backing of the 5th disk to be that of the 10th
-        // and ensure that disk changes. Note that we don't change the identity
-        // of the 5th disk.
-        let mut modified_disk = disks[4].clone();
-        if let RawDisk::Synthetic(disk) = &mut modified_disk {
-            disk.zpool_name = disks[9].zpool_name().clone();
-        } else {
-            panic!();
-        }
-        let mut expected: HashSet<_> =
-            disks.iter().skip(5).take(4).cloned().collect();
-        expected.insert(modified_disk);
-
-        handle
-            .ensure_using_exactly_these_disks(expected.clone().into_iter())
-            .await;
-        let resources = handle.wait_for_changes().await;
-
-        // Ensure the one modified disk changed as we expected
-        assert_eq!(5, resources.disks().len());
-        for raw_disk in expected {
-            let (disk, pool) =
-                resources.disks().get(raw_disk.identity()).unwrap();
-            assert_eq!(disk.zpool_name(), raw_disk.zpool_name());
-            assert_eq!(&pool.name, disk.zpool_name());
-            assert_eq!(raw_disk.identity(), &pool.parent);
-        }
-
-        // Cleanup
-        for zpool in zpools {
-            Zpool::destroy(&zpool).unwrap();
-        }
+        harness.cleanup().await;
         logctx.cleanup_successful();
     }
 
@@ -1088,34 +1392,33 @@ mod tests {
     async fn upsert_filesystem() {
         illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
         let logctx = test_setup_log("upsert_filesystem");
-        let (mut key_manager, key_requester) =
-            KeyManager::new(&logctx.log, HardcodedSecretRetriever::default());
-        let (manager, handle) = StorageManager::new(&logctx.log, key_requester);
+        let mut harness = StorageManagerTestHarness::new(&logctx.log).await;
 
-        // Spawn the key_manager so that it will respond to requests for encryption keys
-        tokio::spawn(async move { key_manager.run().await });
+        // Test setup: Add a U.2 and M.2, adopt them into the "control plane"
+        // for usage.
+        harness.handle().key_manager_ready().await;
+        let raw_disks =
+            harness.add_vdevs(&["u2_under_test.vdev", "m2_helping.vdev"]).await;
+        let config = harness.make_config(1, &raw_disks);
+        let result = harness
+            .handle()
+            .omicron_physical_disks_ensure(config.clone())
+            .await
+            .expect("Ensuring disks should work after key manager is ready");
+        assert!(!result.has_error(), "{:?}", result);
 
-        // Spawn the storage manager as done by sled-agent
-        tokio::spawn(async move {
-            manager.run().await;
-        });
-
-        handle.key_manager_ready().await;
-
-        // Create and add a disk
-        let zpool_name = ZpoolName::new_external(Uuid::new_v4());
-        let dir = tempdir().unwrap();
-        let disk: RawDisk =
-            SyntheticDisk::create_zpool(dir.path(), &zpool_name).into();
-        handle.detected_raw_disk(disk.clone()).await;
-
-        // Create a filesystem
+        // Create a filesystem only the newly formatted U.2
         let dataset_id = Uuid::new_v4();
+        let zpool_name = ZpoolName::new_external(config.disks[0].pool_id);
         let dataset_name =
             DatasetName::new(zpool_name.clone(), DatasetKind::Crucible);
-        handle.upsert_filesystem(dataset_id, dataset_name).await.unwrap();
+        harness
+            .handle()
+            .upsert_filesystem(dataset_id, dataset_name)
+            .await
+            .unwrap();
 
-        Zpool::destroy(&zpool_name).unwrap();
+        harness.cleanup().await;
         logctx.cleanup_successful();
     }
 }

@@ -90,6 +90,7 @@ use illumos_utils::zone::ZONE_PREFIX;
 use illumos_utils::zpool::{ZpoolHealth, ZpoolName};
 use illumos_utils::ExecutionError;
 use sled_hardware::DiskVariant;
+use sled_storage::config::MountConfig;
 use sled_storage::dataset::{CRASH_DATASET, DUMP_DATASET};
 use sled_storage::disk::Disk;
 use slog::Logger;
@@ -117,32 +118,50 @@ struct DebugDataset(Utf8PathBuf);
 struct CoreDataset(Utf8PathBuf);
 
 #[derive(AsRef, Clone, From)]
-pub(super) struct CoreZpool(pub ZpoolName);
+struct CoreZpool {
+    mount_config: MountConfig,
+    name: ZpoolName,
+}
+
 #[derive(AsRef, Clone, From)]
-pub(super) struct DebugZpool(pub ZpoolName);
+struct DebugZpool {
+    mount_config: MountConfig,
+    name: ZpoolName,
+}
 
 impl GetMountpoint for DebugZpool {
     type NewType = DebugDataset;
     const MOUNTPOINT: &'static str = DUMP_DATASET;
+    fn mount_config(&self) -> &MountConfig {
+        &self.mount_config
+    }
 }
 impl GetMountpoint for CoreZpool {
     type NewType = CoreDataset;
     const MOUNTPOINT: &'static str = CRASH_DATASET;
+    fn mount_config(&self) -> &MountConfig {
+        &self.mount_config
+    }
 }
 
 // only want to access these directories after they're mounted!
 trait GetMountpoint: AsRef<ZpoolName> {
     type NewType: From<Utf8PathBuf>;
     const MOUNTPOINT: &'static str;
+
+    fn mount_config(&self) -> &MountConfig;
+
     fn mountpoint(
         &self,
         invoker: &dyn ZfsInvoker,
     ) -> Result<Option<Self::NewType>, ZfsGetError> {
         if invoker.zfs_get_prop(&self.as_ref().to_string(), "mounted")? == "yes"
         {
-            Ok(Some(Self::NewType::from(
-                invoker.mountpoint(self.as_ref(), Self::MOUNTPOINT),
-            )))
+            Ok(Some(Self::NewType::from(invoker.mountpoint(
+                self.mount_config(),
+                self.as_ref(),
+                Self::MOUNTPOINT,
+            ))))
         } else {
             Ok(None)
         }
@@ -170,12 +189,13 @@ struct DumpSetupWorker {
 
 pub struct DumpSetup {
     worker: Arc<std::sync::Mutex<DumpSetupWorker>>,
+    mount_config: MountConfig,
     _poller: std::thread::JoinHandle<()>,
     log: Logger,
 }
 
 impl DumpSetup {
-    pub fn new(log: &Logger) -> Self {
+    pub fn new(log: &Logger, mount_config: MountConfig) -> Self {
         let worker = Arc::new(std::sync::Mutex::new(DumpSetupWorker::new(
             Box::new(RealCoreDumpAdm {}),
             Box::new(RealZfs {}),
@@ -188,7 +208,7 @@ impl DumpSetup {
             Self::poll_file_archival(worker_weak, log_poll)
         });
         let log = log.new(o!("component" => "DumpSetup"));
-        Self { worker, _poller, log }
+        Self { worker, mount_config, _poller, log }
     }
 
     pub(crate) async fn update_dumpdev_setup(
@@ -199,6 +219,7 @@ impl DumpSetup {
         let mut m2_dump_slices = Vec::new();
         let mut u2_debug_datasets = Vec::new();
         let mut m2_core_datasets = Vec::new();
+        let mount_config = self.mount_config.clone();
         for disk in disks {
             if disk.is_synthetic() {
                 // We only setup dump devices on real disks
@@ -220,8 +241,10 @@ impl DumpSetup {
                         illumos_utils::zpool::Zpool::get_info(&name.to_string())
                     {
                         if info.health() == ZpoolHealth::Online {
-                            m2_core_datasets
-                                .push(CoreZpool::from(name.clone()));
+                            m2_core_datasets.push(CoreZpool {
+                                mount_config: mount_config.clone(),
+                                name: name.clone(),
+                            });
                         } else {
                             warn!(log, "Zpool {name:?} not online, won't attempt to save process core dumps there");
                         }
@@ -233,8 +256,10 @@ impl DumpSetup {
                         illumos_utils::zpool::Zpool::get_info(&name.to_string())
                     {
                         if info.health() == ZpoolHealth::Online {
-                            u2_debug_datasets
-                                .push(DebugZpool::from(name.clone()));
+                            u2_debug_datasets.push(DebugZpool {
+                                mount_config: mount_config.clone(),
+                                name: name.clone(),
+                            });
                         } else {
                             warn!(log, "Zpool {name:?} not online, won't attempt to save kernel core dumps there");
                         }
@@ -347,6 +372,7 @@ trait ZfsInvoker {
 
     fn mountpoint(
         &self,
+        mount_config: &MountConfig,
         zpool: &ZpoolName,
         mountpoint: &'static str,
     ) -> Utf8PathBuf;
@@ -456,10 +482,11 @@ impl ZfsInvoker for RealZfs {
 
     fn mountpoint(
         &self,
+        mount_config: &MountConfig,
         zpool: &ZpoolName,
         mountpoint: &'static str,
     ) -> Utf8PathBuf {
-        zpool.dataset_mountpoint(mountpoint)
+        zpool.dataset_mountpoint(&mount_config.root, mountpoint)
     }
 }
 
@@ -1118,6 +1145,7 @@ mod tests {
 
         fn mountpoint(
             &self,
+            _mount_config: &MountConfig,
             zpool: &ZpoolName,
             mountpoint: &'static str,
         ) -> Utf8PathBuf {
@@ -1172,8 +1200,10 @@ mod tests {
         assert_eq!(worker.chosen_core_dir, None);
 
         // nothing when only a disk that's not ready
-        let non_mounted_zpool =
-            CoreZpool(ZpoolName::from_str(NOT_MOUNTED_INTERNAL).unwrap());
+        let non_mounted_zpool = CoreZpool {
+            mount_config: MountConfig::default(),
+            name: ZpoolName::from_str(NOT_MOUNTED_INTERNAL).unwrap(),
+        };
         worker.update_disk_loadout(vec![], vec![], vec![non_mounted_zpool]);
         assert_eq!(worker.chosen_core_dir, None);
         logctx.cleanup_successful();
@@ -1189,11 +1219,18 @@ mod tests {
         const MOUNTED_INTERNAL: &str =
             "oxi_474e554e-6174-616c-6965-4e677579656e";
         const ERROR_INTERNAL: &str = "oxi_4861636b-2054-6865-2050-6c616e657421";
-        let mounted_zpool =
-            CoreZpool(ZpoolName::from_str(MOUNTED_INTERNAL).unwrap());
-        let non_mounted_zpool =
-            CoreZpool(ZpoolName::from_str(NOT_MOUNTED_INTERNAL).unwrap());
-        let err_zpool = CoreZpool(ZpoolName::from_str(ERROR_INTERNAL).unwrap());
+        let mounted_zpool = CoreZpool {
+            mount_config: MountConfig::default(),
+            name: ZpoolName::from_str(MOUNTED_INTERNAL).unwrap(),
+        };
+        let non_mounted_zpool = CoreZpool {
+            mount_config: MountConfig::default(),
+            name: ZpoolName::from_str(NOT_MOUNTED_INTERNAL).unwrap(),
+        };
+        let err_zpool = CoreZpool {
+            mount_config: MountConfig::default(),
+            name: ZpoolName::from_str(ERROR_INTERNAL).unwrap(),
+        };
         const ZPOOL_MNT: &str = "/path/to/internal/zpool";
         let mut worker = DumpSetupWorker::new(
             Box::<FakeCoreDumpAdm>::default(),
@@ -1362,8 +1399,10 @@ mod tests {
         let tempdir = TempDir::new().unwrap();
         let (occupied, _) = populate_tempdir_with_fake_dumps(&tempdir);
 
-        let mounted_zpool =
-            DebugZpool(ZpoolName::from_str(MOUNTED_EXTERNAL).unwrap());
+        let mounted_zpool = DebugZpool {
+            mount_config: MountConfig::default(),
+            name: ZpoolName::from_str(MOUNTED_EXTERNAL).unwrap(),
+        };
         worker.update_disk_loadout(
             vec![occupied.clone()],
             vec![mounted_zpool],
@@ -1445,10 +1484,14 @@ mod tests {
         )
         .unwrap();
 
-        let mounted_core_zpool =
-            CoreZpool(ZpoolName::from_str(MOUNTED_INTERNAL).unwrap());
-        let mounted_debug_zpool =
-            DebugZpool(ZpoolName::from_str(MOUNTED_EXTERNAL).unwrap());
+        let mounted_core_zpool = CoreZpool {
+            mount_config: MountConfig::default(),
+            name: ZpoolName::from_str(MOUNTED_INTERNAL).unwrap(),
+        };
+        let mounted_debug_zpool = DebugZpool {
+            mount_config: MountConfig::default(),
+            name: ZpoolName::from_str(MOUNTED_EXTERNAL).unwrap(),
+        };
 
         worker.update_disk_loadout(
             vec![],

@@ -25,7 +25,8 @@ use crate::zone_bundle::{CleanupContext, ZoneBundler};
 use bootstore::schemes::v0 as bootstore;
 use key_manager::{KeyManager, StorageKeyRequester};
 use sled_hardware::{HardwareManager, SledMode};
-use sled_storage::disk::SyntheticDisk;
+use sled_storage::config::MountConfig;
+use sled_storage::disk::RawSyntheticDisk;
 use sled_storage::manager::{StorageHandle, StorageManager};
 use slog::{info, Logger};
 use std::net::Ipv6Addr;
@@ -79,7 +80,7 @@ pub async fn spawn_all_longrunning_tasks(
         spawn_hardware_monitor(log, &hardware_manager, &storage_manager);
 
     // Add some synthetic disks if necessary.
-    upsert_synthetic_zpools_if_needed(&log, &storage_manager, &config).await;
+    upsert_synthetic_disks_if_needed(&log, &storage_manager, &config).await;
 
     // Wait for the boot disk so that we can work with any ledgers,
     // such as those needed by the bootstore and sled-agent
@@ -124,7 +125,8 @@ fn spawn_storage_manager(
     key_requester: StorageKeyRequester,
 ) -> StorageHandle {
     info!(log, "Starting StorageManager");
-    let (manager, handle) = StorageManager::new(log, key_requester);
+    let (manager, handle) =
+        StorageManager::new(log, MountConfig::default(), key_requester);
     tokio::spawn(async move {
         manager.run().await;
     });
@@ -133,7 +135,8 @@ fn spawn_storage_manager(
 
 fn spawn_storage_monitor(log: &Logger, storage_handle: StorageHandle) {
     info!(log, "Starting StorageMonitor");
-    let storage_monitor = StorageMonitor::new(log, storage_handle);
+    let storage_monitor =
+        StorageMonitor::new(log, MountConfig::default(), storage_handle);
     tokio::spawn(async move {
         storage_monitor.run().await;
     });
@@ -180,7 +183,7 @@ async fn spawn_bootstore_tasks(
     hardware_manager: &HardwareManager,
     global_zone_bootstrap_ip: Ipv6Addr,
 ) -> bootstore::NodeHandle {
-    let iter_all = storage_handle.get_latest_resources().await;
+    let iter_all = storage_handle.get_latest_disks().await;
     let config = new_bootstore_config(
         &iter_all,
         hardware_manager.baseboard(),
@@ -214,20 +217,22 @@ fn spawn_zone_bundler_tasks(
     ZoneBundler::new(log, storage_handle.clone(), CleanupContext::default())
 }
 
-async fn upsert_synthetic_zpools_if_needed(
+async fn upsert_synthetic_disks_if_needed(
     log: &Logger,
     storage_manager: &StorageHandle,
     config: &Config,
 ) {
-    if let Some(pools) = &config.zpools {
-        for pool in pools {
+    if let Some(vdevs) = &config.vdevs {
+        for vdev in vdevs {
             info!(
                 log,
-                "Upserting synthetic zpool to Storage Manager: {}",
-                pool.to_string()
+                "Upserting synthetic device to Storage Manager";
+                "vdev" => vdev.to_string(),
             );
-            let disk = SyntheticDisk::new(pool.clone()).into();
-            storage_manager.detected_raw_disk(disk).await;
+            let disk = RawSyntheticDisk::new(vdev)
+                .expect("Failed to parse synthetic disk")
+                .into();
+            storage_manager.detected_raw_disk(disk).await.await.unwrap();
         }
     }
 }

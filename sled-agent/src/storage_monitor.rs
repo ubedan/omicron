@@ -7,6 +7,7 @@
 //! code.
 
 use crate::dump_setup::DumpSetup;
+use sled_storage::config::MountConfig;
 use sled_storage::manager::StorageHandle;
 use sled_storage::resources::AllDisks;
 use slog::Logger;
@@ -20,8 +21,12 @@ pub struct StorageMonitor {
 }
 
 impl StorageMonitor {
-    pub fn new(log: &Logger, storage_manager: StorageHandle) -> StorageMonitor {
-        let dump_setup = DumpSetup::new(&log);
+    pub fn new(
+        log: &Logger,
+        mount_config: MountConfig,
+        storage_manager: StorageHandle,
+    ) -> StorageMonitor {
+        let dump_setup = DumpSetup::new(&log, mount_config);
         let log = log.new(o!("component" => "StorageMonitor"));
         StorageMonitor { log, storage_manager, dump_setup }
     }

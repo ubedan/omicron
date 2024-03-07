@@ -255,7 +255,7 @@ impl Inner {
     // that can exist but do not, i.e., those whose parent datasets already
     // exist; and returns those.
     async fn bundle_directories(&self) -> Vec<Utf8PathBuf> {
-        let resources = self.storage_handle.get_latest_resources().await;
+        let resources = self.storage_handle.get_latest_disks().await;
         let expected = resources.all_zone_bundle_directories();
         let mut out = Vec::with_capacity(expected.len());
         for each in expected.into_iter() {
@@ -427,7 +427,7 @@ impl ZoneBundler {
     ) -> Result<ZoneBundleMetadata, BundleError> {
         let inner = self.inner.lock().await;
         let storage_dirs = inner.bundle_directories().await;
-        let resources = inner.storage_handle.get_latest_resources().await;
+        let resources = inner.storage_handle.get_latest_disks().await;
         let extra_log_dirs = resources
             .all_u2_mountpoints(U2_DEBUG_DATASET)
             .into_iter()
@@ -2252,7 +2252,7 @@ mod illumos_tests {
             // Spawn the storage related tasks required for testing and insert
             // synthetic disks.
             let storage_handle = setup_storage().await;
-            let resources = storage_handle.get_latest_resources().await;
+            let resources = storage_handle.get_latest_disks().await;
             let dirs = resources.all_zone_bundle_directories();
             for d in dirs.iter() {
                 let id =

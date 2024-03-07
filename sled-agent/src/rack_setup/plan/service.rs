@@ -123,7 +123,7 @@ impl Plan {
         storage_manager: &StorageHandle,
     ) -> Result<Option<Plan>, PlanError> {
         let paths: Vec<Utf8PathBuf> = storage_manager
-            .get_latest_resources()
+            .get_latest_disks()
             .await
             .all_m2_mountpoints(CONFIG_DATASET)
             .into_iter()
@@ -176,7 +176,7 @@ impl Plan {
         storage_manager: &StorageHandle,
     ) -> Result<bool, std::io::Error> {
         let paths = storage_manager
-            .get_latest_resources()
+            .get_latest_disks()
             .await
             .all_m2_mountpoints(CONFIG_DATASET)
             .into_iter()
@@ -730,7 +730,7 @@ impl Plan {
 
         // Once we've constructed a plan, write it down to durable storage.
         let paths: Vec<Utf8PathBuf> = storage_manager
-            .get_latest_resources()
+            .get_latest_disks()
             .await
             .all_m2_mountpoints(CONFIG_DATASET)
             .into_iter()

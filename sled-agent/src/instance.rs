@@ -1333,7 +1333,7 @@ impl InstanceRunner {
         let mut rng = rand::rngs::StdRng::from_entropy();
         let root = self
             .storage
-            .get_latest_resources()
+            .get_latest_disks()
             .await
             .all_u2_mountpoints(ZONE_DATASET)
             .choose(&mut rng)

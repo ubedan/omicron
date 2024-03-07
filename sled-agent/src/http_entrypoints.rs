@@ -866,7 +866,7 @@ async fn host_os_write_start(
 
     // Find our corresponding disk.
     let maybe_disk_path =
-        sa.storage().get_latest_resources().await.iter_managed().find_map(
+        sa.storage().get_latest_disks().await.iter_managed().find_map(
             |(_identity, disk)| {
                 // Synthetic disks panic if asked for their `slot()`, so filter
                 // them out first; additionally, filter out any non-M2 disks.

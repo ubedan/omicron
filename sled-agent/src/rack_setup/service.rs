@@ -805,7 +805,7 @@ impl ServiceInner {
         )?;
 
         let marker_paths: Vec<Utf8PathBuf> = storage_manager
-            .get_latest_resources()
+            .get_latest_disks()
             .await
             .all_m2_mountpoints(CONFIG_DATASET)
             .into_iter()

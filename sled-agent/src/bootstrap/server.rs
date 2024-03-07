@@ -471,7 +471,7 @@ impl From<MissingM2Paths> for SledAgentServerStartError {
 async fn sled_config_paths(
     storage: &StorageHandle,
 ) -> Result<Vec<Utf8PathBuf>, MissingM2Paths> {
-    let resources = storage.get_latest_resources().await;
+    let resources = storage.get_latest_disks().await;
     let paths: Vec<_> = resources
         .all_m2_mountpoints(CONFIG_DATASET)
         .into_iter()
@@ -634,7 +634,7 @@ impl Inner {
         let config_dirs = self
             .long_running_task_handles
             .storage_manager
-            .get_latest_resources()
+            .get_latest_disks()
             .await
             .all_m2_mountpoints(CONFIG_DATASET)
             .into_iter();
