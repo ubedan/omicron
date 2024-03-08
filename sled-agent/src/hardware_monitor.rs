@@ -178,6 +178,12 @@ impl HardwareMonitor {
                 HardwareUpdate::DiskAdded(disk) => {
                     // We notify the storage manager of the hardware, but do not need to
                     // wait for the result to be fully processed.
+                    //
+                    // Here and below, we're "dropping a future" rather than
+                    // awaiting it. That's intentional - the hardware monitor
+                    // don't care when this work is finished, just when it's
+                    // enqueued.
+                    #[allow(clippy::let_underscore_future)]
                     let _ = self
                         .storage_manager
                         .detected_raw_disk(disk.into())
@@ -186,6 +192,7 @@ impl HardwareMonitor {
                 HardwareUpdate::DiskRemoved(disk) => {
                     // We notify the storage manager of the hardware, but do not need to
                     // wait for the result to be fully processed.
+                    #[allow(clippy::let_underscore_future)]
                     let _ = self
                         .storage_manager
                         .detected_raw_disk_removal(disk.into())
@@ -260,6 +267,7 @@ impl HardwareMonitor {
 
         // We notify the storage manager of the hardware, but do not need to
         // wait for the result to be fully processed.
+        #[allow(clippy::let_underscore_future)]
         let _ = self
             .storage_manager
             .ensure_using_exactly_these_disks(

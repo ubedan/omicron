@@ -100,13 +100,11 @@ impl Drop for StorageManagerTestHarness {
                 let Ok(entries) = pool.read_dir_utf8() else {
                     continue;
                 };
-                for entry in entries {
-                    if let Ok(entry) = entry {
-                        eprintln!(
-                            "  pfexec zpool destroy {prefix}{} ",
-                            entry.file_name()
-                        );
-                    }
+                for entry in entries.flatten() {
+                    eprintln!(
+                        "  pfexec zpool destroy {prefix}{} ",
+                        entry.file_name()
+                    );
                 }
             }
             eprintln!("  pfexec rm -rf {}", vdev_dir.path());
@@ -216,7 +214,9 @@ impl StorageManagerTestHarness {
                     &vdev_path,
                     1 << 30,
                 )
-                .expect(&format!("Failed to create synthetic disk for {vdev}"))
+                .unwrap_or_else(|_| {
+                    panic!("Failed to create synthetic disk for {vdev}")
+                })
                 .into();
             self.handle
                 .detected_raw_disk(raw_disk.clone())
