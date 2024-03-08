@@ -333,7 +333,17 @@ pub fn ensure_zpool_failmode_is_continue(
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Ord, PartialOrd
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    Ord,
+    PartialOrd,
 )]
 pub enum DiskVariant {
     U2,

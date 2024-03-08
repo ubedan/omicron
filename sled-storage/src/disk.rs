@@ -115,7 +115,7 @@ pub struct RawSyntheticDisk {
 }
 
 impl RawSyntheticDisk {
-   /// Creates the file with a specified length, and also parses it as
+    /// Creates the file with a specified length, and also parses it as
     /// a [RawSyntheticDisk].
     pub fn new_with_length<P: AsRef<Utf8Path>>(
         vdev: P,

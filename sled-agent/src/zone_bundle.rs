@@ -2217,7 +2217,8 @@ mod illumos_tests {
         let mut harness = StorageManagerTestHarness::new(&log).await;
 
         harness.handle().key_manager_ready().await;
-        let _raw_disks = harness.add_vdevs(&["m2_left.vdev", "m2_right.vdev"]).await;
+        let _raw_disks =
+            harness.add_vdevs(&["m2_left.vdev", "m2_right.vdev"]).await;
         harness
     }
 
@@ -2227,8 +2228,9 @@ mod illumos_tests {
         async fn new(log: &Logger) -> Self {
             // Spawn the storage related tasks required for testing and insert
             // synthetic disks.
-            let mut storage_test_harness = setup_storage(log).await;
-            let resources = storage_test_harness.handle().get_latest_disks().await;
+            let storage_test_harness = setup_storage(log).await;
+            let resources =
+                storage_test_harness.handle().get_latest_disks().await;
             let mut dirs = resources.all_zone_bundle_directories();
             dirs.sort();
             Self { storage_test_harness, dirs }
@@ -2247,7 +2249,7 @@ mod illumos_tests {
     async fn setup_fake_cleanup_task() -> anyhow::Result<CleanupTestContext> {
         let log = test_logger();
         let context = CleanupContext::default();
-        let mut resource_wrapper = ResourceWrapper::new(&log).await;
+        let resource_wrapper = ResourceWrapper::new(&log).await;
         let bundler = ZoneBundler::new(
             log,
             resource_wrapper.storage_test_harness.handle().clone(),
@@ -2330,7 +2332,8 @@ mod illumos_tests {
             .next()
             .context("no utilization information?")?;
         anyhow::ensure!(
-            bundle_utilization.dataset_quota == u64::try_from(TEST_QUOTA).unwrap(),
+            bundle_utilization.dataset_quota
+                == u64::try_from(TEST_QUOTA).unwrap(),
             "computed incorrect dataset quota"
         );
 
@@ -2414,7 +2417,9 @@ mod illumos_tests {
         run_test_with_zfs_dataset(test_cleanup_body).await;
     }
 
-    async fn test_cleanup_body(mut ctx: CleanupTestContext) -> anyhow::Result<()> {
+    async fn test_cleanup_body(
+        mut ctx: CleanupTestContext,
+    ) -> anyhow::Result<()> {
         // Let's add a bunch of fake bundles, until we should be over the
         // storage limit. These will all be explicit requests, so the priority
         // should be decided based on time, i.e., the ones first added should be
@@ -2590,7 +2595,9 @@ mod illumos_tests {
             time_created: Utc
                 .with_ymd_and_hms(year, month, day, 0, 0, 0)
                 .single()
-                .context(format!("invalid year {year}/month {month}/day {day}"))?,
+                .context(format!(
+                    "invalid year {year}/month {month}/day {day}"
+                ))?,
             cause,
             version: 0,
         };

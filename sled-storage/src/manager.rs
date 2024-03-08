@@ -59,7 +59,7 @@ pub(crate) const QUEUE_SIZE: usize = 256;
 const DISKS_LEDGER_FILENAME: &str = "omicron-physical-disks.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StorageManagerState {
+enum StorageManagerState {
     // We know that any attempts to manage disks will fail, as the key manager
     // is not ready yet.
     WaitingForKeyManager,
@@ -121,16 +121,6 @@ pub(crate) enum StorageRequest {
     /// serializes through the `StorageManager` task after all prior requests.
     /// This serialization is particularly useful for tests.
     GetLatestResources(DebugIgnore<oneshot::Sender<AllDisks>>),
-
-    /// Get the internal task state of the manager
-    GetManagerState(DebugIgnore<oneshot::Sender<StorageManagerData>>),
-}
-
-/// Data managed internally to the StorageManagerTask that can be useful
-/// to clients for debugging purposes, and that isn't exposed in other ways.
-#[derive(Debug, Clone)]
-pub struct StorageManagerData {
-    pub state: StorageManagerState,
 }
 
 /// A mechanism for interacting with the [`StorageManager`]
@@ -141,11 +131,11 @@ pub struct StorageHandle {
 }
 
 impl StorageHandle {
-    pub(crate) fn new(tx: mpsc::Sender<StorageRequest>, disk_updates: watch::Receiver<AllDisks>) -> Self {
-        Self {
-            tx,
-            disk_updates,
-        }
+    pub(crate) fn new(
+        tx: mpsc::Sender<StorageRequest>,
+        disk_updates: watch::Receiver<AllDisks>,
+    ) -> Self {
+        Self { tx, disk_updates }
     }
 
     /// Adds a disk and associated zpool to the storage manager.
@@ -277,13 +267,6 @@ impl StorageHandle {
         rx.await.unwrap()
     }
 
-    /// Return internal data useful for debugging and testing
-    pub async fn get_manager_state(&self) -> StorageManagerData {
-        let (tx, rx) = oneshot::channel();
-        self.tx.send(StorageRequest::GetManagerState(tx.into())).await.unwrap();
-        rx.await.unwrap()
-    }
-
     pub async fn upsert_filesystem(
         &self,
         dataset_id: Uuid,
@@ -325,7 +308,7 @@ impl StorageManager {
                 rx,
                 resources,
             },
-            StorageHandle { tx, disk_updates },
+            StorageHandle::new(tx, disk_updates),
         )
     }
 
@@ -400,9 +383,6 @@ impl StorageManager {
             }
             StorageRequest::GetLatestResources(tx) => {
                 let _ = tx.0.send(self.resources.disks().clone());
-            }
-            StorageRequest::GetManagerState(tx) => {
-                let _ = tx.0.send(StorageManagerData { state: self.state });
             }
         };
 
@@ -714,8 +694,8 @@ impl StorageManager {
 mod tests {
     use crate::dataset::DatasetKind;
     use crate::disk::RawSyntheticDisk;
-    use crate::resources::DiskManagementError;
     use crate::manager_test_harness::StorageManagerTestHarness;
+    use crate::resources::DiskManagementError;
 
     use super::*;
     use camino_tempfile::tempdir;
@@ -792,7 +772,7 @@ mod tests {
         // Add an M.2 which can store the ledger.
         let _raw_disks =
             harness.add_vdevs(&["m2_finally_showed_up.vdev"]).await;
-        harness.handle().wait_for_boot_disk().await;
+        harness.handle_mut().wait_for_boot_disk().await;
 
         let result = harness
             .handle()
@@ -802,7 +782,7 @@ mod tests {
         assert!(!result.has_error(), "{:?}", result);
 
         // Wait for the add disk notification
-        let all_disks = harness.handle().wait_for_changes().await;
+        let all_disks = harness.handle_mut().wait_for_changes().await;
         assert_eq!(all_disks.all_u2_zpools().len(), 1);
         assert_eq!(all_disks.all_m2_zpools().len(), 1);
 
@@ -840,14 +820,14 @@ mod tests {
 
         // When we wait for changes, we can see the U.2 being added, but no boot
         // disk.
-        let all_disks = harness.handle().wait_for_changes().await;
+        let all_disks = harness.handle_mut().wait_for_changes().await;
         assert_eq!(1, all_disks.iter_all().collect::<Vec<_>>().len());
         assert!(all_disks.boot_disk().is_none());
 
         // Waiting for the boot disk should time out.
         assert!(tokio::time::timeout(
             tokio::time::Duration::from_millis(10),
-            harness.handle().wait_for_boot_disk(),
+            harness.handle_mut().wait_for_boot_disk(),
         )
         .await
         .is_err());
@@ -856,16 +836,16 @@ mod tests {
         let boot_disk = harness.add_vdevs(&["m2_under_test.vdev"]).await;
 
         // It shows up through the general "wait for changes" API.
-        let all_disks = harness.handle().wait_for_changes().await;
+        let all_disks = harness.handle_mut().wait_for_changes().await;
         assert_eq!(2, all_disks.iter_all().collect::<Vec<_>>().len());
         assert!(all_disks.boot_disk().is_some());
 
         // We can wait for, and see, the boot disk.
-        let (id, _) = harness.handle().wait_for_boot_disk().await;
+        let (id, _) = harness.handle_mut().wait_for_boot_disk().await;
         assert_eq!(&id, boot_disk[0].identity());
 
         // We can keep calling this function without blocking.
-        let (id, _) = harness.handle().wait_for_boot_disk().await;
+        let (id, _) = harness.handle_mut().wait_for_boot_disk().await;
         assert_eq!(&id, boot_disk[0].identity());
 
         harness.cleanup().await;
@@ -904,7 +884,7 @@ mod tests {
         let mut harness = harness.reboot(&logctx.log).await;
 
         // Both disks exist, but the U.2's pool is not yet accessible.
-        let all_disks = harness.handle().wait_for_changes().await;
+        let all_disks = harness.handle_mut().wait_for_changes().await;
         assert_eq!(2, all_disks.iter_all().collect::<Vec<_>>().len());
         assert_eq!(0, all_disks.all_u2_zpools().len());
         assert_eq!(1, all_disks.all_m2_zpools().len());
@@ -912,7 +892,7 @@ mod tests {
         // Mark the key manaager ready. This should eventually lead to the
         // U.2 being managed, since it exists in the M.2 ledger.
         harness.handle().key_manager_ready().await;
-        let all_disks = harness.handle().wait_for_changes().await;
+        let all_disks = harness.handle_mut().wait_for_changes().await;
         assert_eq!(1, all_disks.all_u2_zpools().len());
 
         harness.cleanup().await;
@@ -954,8 +934,8 @@ mod tests {
             .unwrap();
         assert!(result.has_error());
         assert!(matches!(
-            result.status[0].result.as_ref(),
-            Err(DiskManagementError::KeyManager(_))
+            result.status[0].err.as_ref(),
+            Some(DiskManagementError::KeyManager(_))
         ));
         let all_disks = harness.handle().get_latest_disks().await;
         assert_eq!(0, all_disks.all_u2_zpools().len());
@@ -985,7 +965,7 @@ mod tests {
         let mut raw_disks = harness.add_vdevs(&["u2_under_test.vdev"]).await;
 
         // Access the add disk notification
-        let all_disks = harness.handle().wait_for_changes().await;
+        let all_disks = harness.handle_mut().wait_for_changes().await;
         assert_eq!(1, all_disks.iter_all().collect::<Vec<_>>().len());
 
         // Delete the disk and wait for a notification
@@ -995,7 +975,7 @@ mod tests {
             .await
             .await
             .unwrap();
-        let all_disks = harness.handle().wait_for_changes().await;
+        let all_disks = harness.handle_mut().wait_for_changes().await;
         assert_eq!(0, all_disks.iter_all().collect::<Vec<_>>().len());
 
         harness.cleanup().await;
@@ -1042,7 +1022,7 @@ mod tests {
             .await
             .unwrap();
 
-        let all_disks = harness.handle().wait_for_changes().await;
+        let all_disks = harness.handle_mut().wait_for_changes().await;
         assert_eq!(3, all_disks.iter_all().collect::<Vec<_>>().len());
 
         let expected: HashSet<_> =

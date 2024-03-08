@@ -4,80 +4,16 @@
 
 //! Utilities for creating a StorageManager under test.
 
-use crate::manager::{StorageHandle, StorageManager, StorageRequest};
-use crate::resources::StorageResources;
 use crate::config::MountConfig;
 use crate::disk::{OmicronPhysicalDisksConfig, RawDisk};
+use crate::manager::{StorageHandle, StorageManager};
 use camino::Utf8PathBuf;
 use slog::{info, Logger};
 use std::sync::{
-    Arc, atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
-use tokio::sync::mpsc;
 use uuid::Uuid;
-
-// Some sled-agent tests cannot currently use the real StorageManager
-// and want to fake the entire behavior, but still have access to the
-// `StorageResources`. We allow this via use of the `FakeStorageManager`
-// that will respond to real storage requests from a real `StorageHandle`.
-#[cfg(feature = "testing")]
-pub struct FakeStorageManager {
-    rx: mpsc::Receiver<StorageRequest>,
-    _key_manager: key_manager::KeyManager<HardcodedSecretRetriever>,
-    resources: StorageResources,
-}
-
-#[cfg(feature = "testing")]
-impl FakeStorageManager {
-    pub fn new(log: &Logger) -> (Self, StorageHandle) {
-        let (tx, rx) = mpsc::channel(crate::manager::QUEUE_SIZE);
-        let (_key_manager, key_requester) = key_manager::KeyManager::new(
-            &log,
-            HardcodedSecretRetriever::default(),
-        );
-        let resources =
-            StorageResources::new(log, MountConfig::default(), key_requester);
-        let disk_updates = resources.watch_disks();
-        (
-            Self { rx, _key_manager, resources },
-            StorageHandle::new(tx, disk_updates),
-        )
-    }
-
-    /// Run the main receive loop of the `FakeStorageManager`
-    ///
-    /// This should be spawned into a tokio task
-    pub async fn run(mut self) {
-        loop {
-            match self.rx.recv().await {
-                Some(StorageRequest::DetectedRawDisk { raw_disk, tx }) => {
-                    self.detected_raw_disk(raw_disk);
-                    let _ = tx.0.send(Ok(()));
-                }
-                Some(StorageRequest::GetLatestResources(tx)) => {
-                    let _ = tx.0.send(self.resources.disks().clone());
-                }
-                Some(_) => {
-                    unreachable!();
-                }
-                None => break,
-            }
-        }
-    }
-
-    // Add a disk to `StorageResources` if it is new and return true if so
-    fn detected_raw_disk(&mut self, raw_disk: RawDisk) {
-        match &raw_disk {
-            RawDisk::Real(_) => {
-                panic!(
-                    "Only synthetic disks can be used with `FakeStorageManager`"
-                );
-            }
-            RawDisk::Synthetic(_) => (),
-        };
-        self.resources.insert_raw_disk(raw_disk);
-    }
-}
 
 /// A [`key-manager::SecretRetriever`] that only returns hardcoded IKM for
 /// epoch 0
@@ -146,11 +82,19 @@ impl Drop for StorageManagerTestHarness {
             );
 
             let pools = [
-                (illumos_utils::zpool::ZPOOL_INTERNAL_PREFIX, vdev_dir.path().join("pool/int")),
-                (illumos_utils::zpool::ZPOOL_EXTERNAL_PREFIX, vdev_dir.path().join("pool/ext")),
+                (
+                    illumos_utils::zpool::ZPOOL_INTERNAL_PREFIX,
+                    vdev_dir.path().join("pool/int"),
+                ),
+                (
+                    illumos_utils::zpool::ZPOOL_EXTERNAL_PREFIX,
+                    vdev_dir.path().join("pool/ext"),
+                ),
             ];
 
-            eprintln!("The following commands may need to be run to clean up state:");
+            eprintln!(
+                "The following commands may need to be run to clean up state:"
+            );
             eprintln!("---");
             for (prefix, pool) in pools {
                 let Ok(entries) = pool.read_dir_utf8() else {
@@ -158,7 +102,10 @@ impl Drop for StorageManagerTestHarness {
                 };
                 for entry in entries {
                     if let Ok(entry) = entry {
-                        eprintln!("  pfexec zpool destroy {prefix}{} ", entry.file_name());
+                        eprintln!(
+                            "  pfexec zpool destroy {prefix}{} ",
+                            entry.file_name()
+                        );
                     }
                 }
             }
@@ -186,8 +133,7 @@ impl StorageManagerTestHarness {
     ) -> Self {
         let mount_config = MountConfig { root: tmp.path().into() };
 
-        let key_manager_error_injector =
-            Arc::new(AtomicBool::new(false));
+        let key_manager_error_injector = Arc::new(AtomicBool::new(false));
         let (mut key_manager, key_requester) = key_manager::KeyManager::new(
             &log,
             HardcodedSecretRetriever {
@@ -226,7 +172,8 @@ impl StorageManagerTestHarness {
         self.storage_manager_task.abort();
 
         // Deconstruct the test harness
-        let vdev_dir = std::mem::take(&mut self.vdev_dir).expect("Already terminated");
+        let vdev_dir =
+            std::mem::take(&mut self.vdev_dir).expect("Already terminated");
         let vdevs = std::mem::take(&mut self.vdevs);
 
         // Re-create all the state we created during the constructor, but
@@ -256,7 +203,10 @@ impl StorageManagerTestHarness {
         &mut self,
         vdevs: &[&P],
     ) -> Vec<RawDisk> {
-        let vdev_dir = self.vdev_dir.as_ref().expect("Cannot add vdevs, test harness terminated");
+        let vdev_dir = self
+            .vdev_dir
+            .as_ref()
+            .expect("Cannot add vdevs, test harness terminated");
         let mut added = vec![];
         for vdev in vdevs.iter().map(|vdev| Utf8PathBuf::from(vdev.as_ref())) {
             assert!(vdev.is_relative());
@@ -307,14 +257,17 @@ impl StorageManagerTestHarness {
     }
 
     /// Returns the underlying [crate::manager::StorageHandle].
-    pub fn handle(&mut self) -> &mut StorageHandle {
+    pub fn handle_mut(&mut self) -> &mut StorageHandle {
         &mut self.handle
     }
 
+    /// Returns the underlying [crate::manager::StorageHandle].
+    pub fn handle(&self) -> &StorageHandle {
+        &self.handle
+    }
+
     /// Set to "true" to throw errors, "false" to not inject errors.
-    pub fn key_manager_error_injector(
-        &self,
-    ) -> &Arc<AtomicBool> {
+    pub fn key_manager_error_injector(&self) -> &Arc<AtomicBool> {
         &self.key_manager_error_injector
     }
 

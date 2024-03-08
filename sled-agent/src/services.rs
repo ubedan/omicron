@@ -662,7 +662,7 @@ pub(crate) enum TimeSyncConfig {
     // Skips timesync unconditionally.
     Skip,
     // Fails timesync unconditionally.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "illumos"))]
     Fail,
 }
 
@@ -735,12 +735,12 @@ impl ServiceManager {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "illumos"))]
     fn override_ledger_directory(&self, path: Utf8PathBuf) {
         self.inner.ledger_directory_override.set(path).unwrap();
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "illumos"))]
     fn override_image_directory(&self, path: Utf8PathBuf) {
         self.inner.image_directory_override.set(path).unwrap();
     }
@@ -3328,7 +3328,7 @@ impl ServiceManager {
         let skip_timesync = match &self.inner.time_sync_config {
             TimeSyncConfig::Normal => false,
             TimeSyncConfig::Skip => true,
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "illumos"))]
             TimeSyncConfig::Fail => {
                 info!(self.inner.log, "Configured to fail timesync checks");
                 return Err(Error::TimeNotSynchronized);
@@ -3908,7 +3908,7 @@ impl ServiceManager {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "illumos"))]
 mod test {
     use super::*;
     use illumos_utils::{
@@ -3919,10 +3919,8 @@ mod test {
         svc,
         zone::MockZones,
     };
-    use sled_storage::disk::{RawDisk, RawSyntheticDisk};
 
-    use sled_storage::manager::StorageHandle;
-    use sled_storage::manager_test_harness::FakeStorageManager;
+    use sled_storage::manager_test_harness::StorageManagerTestHarness;
     use std::net::{Ipv6Addr, SocketAddrV6};
     use std::os::unix::process::ExitStatusExt;
     use uuid::Uuid;
@@ -4143,15 +4141,18 @@ mod test {
     ) -> Result<(), Error> {
         let zone_prefix = format!("oxz_{}", zone_type.zone_type_str());
         let _expectations = expect_new_service(&zone_prefix);
-        mgr.ensure_all_omicron_zones_persistent(OmicronZonesConfig {
-            generation,
-            zones: vec![OmicronZoneConfig {
-                id,
-                underlay_address: Ipv6Addr::LOCALHOST,
-                zone_type,
-            }],
-        })
-        .await
+        let r = mgr
+            .ensure_all_omicron_zones_persistent(OmicronZonesConfig {
+                generation,
+                zones: vec![OmicronZoneConfig {
+                    id,
+                    underlay_address: Ipv6Addr::LOCALHOST,
+                    zone_type,
+                }],
+            })
+            .await;
+        illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
+        r
     }
 
     // Prepare to call "ensure" for a service which already exists. We should
@@ -4230,40 +4231,25 @@ mod test {
         }
     }
 
-    async fn setup_storage(
-        log: &Logger,
-    ) -> (StorageHandle, camino_tempfile::Utf8TempDir) {
-        let (manager, handle) = FakeStorageManager::new(log);
-
-        // Spawn the storage manager as done by sled-agent
-        tokio::spawn(async move {
-            manager.run().await;
-        });
-
-        let vdev_dir = camino_tempfile::tempdir().unwrap();
-
-        let internal_vdev_path = vdev_dir.path().join("m2_test.vdev");
-        let internal_disk: RawDisk =
-            RawSyntheticDisk::new_with_length(internal_vdev_path, 1 << 30)
-                .unwrap()
-                .into();
-        handle.detected_raw_disk(internal_disk).await.await.unwrap();
-
-        let external_vdev_path = vdev_dir.path().join("u2_test.vdev");
-        let external_disk: RawDisk =
-            RawSyntheticDisk::new_with_length(external_vdev_path, 1 << 30)
-                .unwrap()
-                .into();
-        handle.detected_raw_disk(external_disk).await.await.unwrap();
-
-        (handle, vdev_dir)
+    async fn setup_storage(log: &Logger) -> StorageManagerTestHarness {
+        let mut harness = StorageManagerTestHarness::new(&log).await;
+        let raw_disks =
+            harness.add_vdevs(&["u2_test.vdev", "m2_test.vdev"]).await;
+        harness.handle().key_manager_ready().await;
+        let config = harness.make_config(1, &raw_disks);
+        let result = harness
+            .handle()
+            .omicron_physical_disks_ensure(config.clone())
+            .await
+            .expect("Failed to ensure disks");
+        assert!(!result.has_error(), "{:?}", result);
+        harness
     }
 
     struct LedgerTestHelper<'a> {
         log: slog::Logger,
         ddmd_client: DdmAdminClient,
-        storage_handle: StorageHandle,
-        _tmpdir: camino_tempfile::Utf8TempDir,
+        storage_test_harness: StorageManagerTestHarness,
         zone_bundler: ZoneBundler,
         test_config: &'a TestConfig,
     }
@@ -4274,21 +4260,24 @@ mod test {
             test_config: &'a TestConfig,
         ) -> LedgerTestHelper {
             let ddmd_client = DdmAdminClient::localhost(&log).unwrap();
-            let (storage_handle, tmpdir) = setup_storage(&log).await;
+            let storage_test_harness = setup_storage(&log).await;
             let zone_bundler = ZoneBundler::new(
                 log.clone(),
-                storage_handle.clone(),
+                storage_test_harness.handle().clone(),
                 Default::default(),
             );
 
             LedgerTestHelper {
                 log,
                 ddmd_client,
-                storage_handle,
-                _tmpdir: tmpdir,
+                storage_test_harness,
                 zone_bundler,
                 test_config,
             }
+        }
+
+        async fn cleanup(&mut self) {
+            self.storage_test_harness.cleanup().await;
         }
 
         fn new_service_manager(&self) -> ServiceManager {
@@ -4308,7 +4297,7 @@ mod test {
                 time_sync_config,
                 SidecarRevision::Physical("rev-test".to_string()),
                 vec![],
-                self.storage_handle.clone(),
+                self.storage_test_harness.handle().clone(),
                 self.zone_bundler.clone(),
             );
             self.test_config.override_paths(&mgr);
@@ -4343,7 +4332,7 @@ mod test {
         let logctx =
             omicron_test_utils::dev::test_setup_log("test_ensure_service");
         let test_config = TestConfig::new().await;
-        let helper =
+        let mut helper =
             LedgerTestHelper::new(logctx.log.clone(), &test_config).await;
         let mgr = helper.new_service_manager();
         LedgerTestHelper::sled_agent_started(&logctx.log, &test_config, &mgr);
@@ -4366,6 +4355,7 @@ mod test {
 
         drop_service_manager(mgr);
 
+        helper.cleanup().await;
         logctx.cleanup_successful();
     }
 
@@ -4375,7 +4365,7 @@ mod test {
             "test_ensure_service_before_timesync",
         );
         let test_config = TestConfig::new().await;
-        let helper =
+        let mut helper =
             LedgerTestHelper::new(logctx.log.clone(), &test_config).await;
 
         let mgr =
@@ -4438,6 +4428,7 @@ mod test {
         .unwrap();
 
         drop_service_manager(mgr);
+        helper.cleanup().await;
         logctx.cleanup_successful();
     }
 
@@ -4447,7 +4438,7 @@ mod test {
             "test_ensure_service_which_already_exists",
         );
         let test_config = TestConfig::new().await;
-        let helper =
+        let mut helper =
             LedgerTestHelper::new(logctx.log.clone(), &test_config).await;
         let mgr = helper.new_service_manager();
         LedgerTestHelper::sled_agent_started(&logctx.log, &test_config, &mgr);
@@ -4465,6 +4456,7 @@ mod test {
 
         drop_service_manager(mgr);
 
+        helper.cleanup().await;
         logctx.cleanup_successful();
     }
 
@@ -4474,7 +4466,7 @@ mod test {
             "test_services_are_recreated_on_reboot",
         );
         let test_config = TestConfig::new().await;
-        let helper =
+        let mut helper =
             LedgerTestHelper::new(logctx.log.clone(), &test_config).await;
 
         // First, spin up a ServiceManager, create a new zone, and then tear
@@ -4492,6 +4484,7 @@ mod test {
         let _expectations = expect_new_service(EXPECTED_ZONE_NAME_PREFIX);
         let mgr = helper.new_service_manager();
         LedgerTestHelper::sled_agent_started(&logctx.log, &test_config, &mgr);
+        illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
 
         let found =
             mgr.omicron_zones_list().await.expect("failed to list zones");
@@ -4501,6 +4494,7 @@ mod test {
 
         drop_service_manager(mgr);
 
+        helper.cleanup().await;
         logctx.cleanup_successful();
     }
 
@@ -4510,7 +4504,7 @@ mod test {
             "test_services_do_not_persist_without_config",
         );
         let test_config = TestConfig::new().await;
-        let helper =
+        let mut helper =
             LedgerTestHelper::new(logctx.log.clone(), &test_config).await;
 
         // First, spin up a ServiceManager, create a new zone, and then tear
@@ -4542,6 +4536,7 @@ mod test {
 
         drop_service_manager(mgr);
 
+        helper.cleanup().await;
         logctx.cleanup_successful();
     }
 
@@ -4551,7 +4546,7 @@ mod test {
         let logctx =
             omicron_test_utils::dev::test_setup_log("test_bad_generations");
         let test_config = TestConfig::new().await;
-        let helper =
+        let mut helper =
             LedgerTestHelper::new(logctx.log.clone(), &test_config).await;
         let mgr = helper.new_service_manager();
         LedgerTestHelper::sled_agent_started(&logctx.log, &test_config, &mgr);
@@ -4656,6 +4651,8 @@ mod test {
 
         drop_service_manager(mgr);
 
+        illumos_utils::USE_MOCKS.store(false, Ordering::SeqCst);
+        helper.cleanup().await;
         logctx.cleanup_successful();
     }
 
@@ -4677,7 +4674,7 @@ mod test {
         .expect("failed to copy example old-format services ledger into place");
 
         // Now start the service manager.
-        let helper =
+        let mut helper =
             LedgerTestHelper::new(logctx.log.clone(), &test_config).await;
         let mgr = helper.new_service_manager();
         LedgerTestHelper::sled_agent_started(&logctx.log, &test_config, &mgr);
@@ -4720,6 +4717,7 @@ mod test {
         assert_eq!(found, expected_config);
 
         drop_service_manager(mgr);
+        helper.cleanup().await;
         logctx.cleanup_successful();
     }
 
@@ -4729,7 +4727,7 @@ mod test {
             "test_old_ledger_migration_bad",
         );
         let test_config = TestConfig::new().await;
-        let helper =
+        let mut helper =
             LedgerTestHelper::new(logctx.log.clone(), &test_config).await;
 
         // Before we start things, stuff a broken ledger into place.  For this
@@ -4757,6 +4755,7 @@ mod test {
             format!("{:#}", error)
         );
 
+        helper.cleanup().await;
         logctx.cleanup_successful();
     }
 

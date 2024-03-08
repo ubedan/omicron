@@ -29,6 +29,7 @@ const BUNDLE_DIRECTORY: &str = "bundle";
 const ZONE_BUNDLE_DIRECTORY: &str = "zone";
 
 #[derive(Debug, thiserror::Error, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type", content = "value")]
 pub enum DiskManagementError {
     #[error("Disk requested by control plane, but not found on device")]
     NotFound,
@@ -55,9 +56,10 @@ impl DiskManagementError {
 /// Identifies how a single disk management operation may have succeeded or
 /// failed.
 #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct DiskManagementStatus {
     pub identity: DiskIdentity,
-    pub result: Result<(), DiskManagementError>,
+    pub err: Option<DiskManagementError>,
 }
 
 /// The result from attempting to manage underlying disks.
@@ -68,6 +70,7 @@ pub struct DiskManagementStatus {
 /// This structure provides a mechanism for callers to learn about partial
 /// failures, and handle them appropriately on a per-disk basis.
 #[derive(Default, Debug, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[must_use = "this `DiskManagementResult` may contain errors, which should be handled"]
 pub struct DisksManagementResult {
     pub status: Vec<DiskManagementStatus>,
@@ -76,7 +79,7 @@ pub struct DisksManagementResult {
 impl DisksManagementResult {
     pub fn has_error(&self) -> bool {
         for status in &self.status {
-            if status.result.is_err() {
+            if status.err.is_some() {
                 return true;
             }
         }
@@ -85,7 +88,7 @@ impl DisksManagementResult {
 
     pub fn has_retryable_error(&self) -> bool {
         for status in &self.status {
-            if let Err(err) = &status.result {
+            if let Some(err) = &status.err {
                 if err.retryable() {
                     return true;
                 }
@@ -361,7 +364,7 @@ impl StorageResources {
                 );
                 result.status.push(DiskManagementStatus {
                     identity: identity.clone(),
-                    result: Err(DiskManagementError::NotFound),
+                    err: Some(DiskManagementError::NotFound),
                 });
                 continue;
             };
@@ -388,7 +391,7 @@ impl StorageResources {
                             warn!(self.log, "Cannot parse disk"; "err" => ?err);
                             result.status.push(DiskManagementStatus {
                                 identity: identity.clone(),
-                                result: Err(err),
+                                err: Some(err),
                             });
                             continue;
                         }
@@ -407,12 +410,10 @@ impl StorageResources {
                         );
                         result.status.push(DiskManagementStatus {
                             identity: identity.clone(),
-                            result: Err(
-                                DiskManagementError::ZpoolUuidMismatch {
-                                    expected,
-                                    observed,
-                                },
-                            ),
+                            err: Some(DiskManagementError::ZpoolUuidMismatch {
+                                expected,
+                                observed,
+                            }),
                         });
                         continue;
                     }
@@ -424,7 +425,7 @@ impl StorageResources {
 
             result.status.push(DiskManagementStatus {
                 identity: identity.clone(),
-                result: Ok(()),
+                err: None,
             });
         }
 
@@ -510,20 +511,6 @@ impl StorageResources {
         self.disk_updates.send_replace(self.disks.clone());
 
         Ok(())
-    }
-
-    /// Insert a disk while creating a fake pool
-    /// This is a workaround for current mock based testing strategies
-    /// in the sled-agent.
-    #[cfg(feature = "testing")]
-    pub fn insert_raw_disk(&mut self, disk: RawDisk) {
-        let disk_id = disk.identity().clone();
-        if self.disks.values.contains_key(&disk_id) {
-            return;
-        }
-        Arc::make_mut(&mut self.disks.values)
-            .insert(disk_id, ManagedDisk::Unmanaged(disk));
-        self.disk_updates.send_replace(self.disks.clone());
     }
 
     /// Delete a disk and its zpool
