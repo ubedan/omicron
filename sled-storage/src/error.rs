@@ -108,7 +108,7 @@ impl From<Error> for omicron_common::api::external::Error {
             },
             Error::ZpoolNotFound(name) => ExternalError::ObjectNotFound {
                 type_name: ResourceType::Zpool,
-                lookup_type: LookupType::ByName(name.try_into().unwrap()),
+                lookup_type: LookupType::ByName(name),
             },
             Error::KeyManagerNotReady => ExternalError::ServiceUnavailable {
                 internal_message:
