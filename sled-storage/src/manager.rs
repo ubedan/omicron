@@ -112,6 +112,13 @@ pub(crate) enum StorageRequest {
         tx: DebugIgnore<oneshot::Sender<Result<DisksManagementResult, Error>>>,
     },
 
+    // Reads that last set of physical disks that were successfully ensured.
+    OmicronPhysicalDisksList {
+        tx: DebugIgnore<
+            oneshot::Sender<Result<OmicronPhysicalDisksConfig, Error>>,
+        >,
+    },
+
     // Requests the creation of a new dataset within a managed disk.
     NewFilesystem(NewFilesystemRequest),
 
@@ -214,6 +221,25 @@ impl StorageHandle {
                 config,
                 tx: tx.into(),
             })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Reads the last value written to storage by
+    /// [Self::omicron_physical_disks_ensure].
+    ///
+    /// This should be contrasted with both inventory and the result
+    /// of [Self::get_latest_disks] -- since this function focuses on
+    /// "Control Plane disks", it may return information about disks
+    /// that are no longer detected within the hardware of this sled.
+    pub async fn omicron_physical_disks_list(
+        &self,
+    ) -> Result<OmicronPhysicalDisksConfig, Error> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(StorageRequest::OmicronPhysicalDisksList { tx: tx.into() })
             .await
             .unwrap();
 
@@ -370,6 +396,9 @@ impl StorageManager {
             StorageRequest::OmicronPhysicalDisksEnsure { config, tx } => {
                 let _ =
                     tx.0.send(self.omicron_physical_disks_ensure(config).await);
+            }
+            StorageRequest::OmicronPhysicalDisksList { tx } => {
+                let _ = tx.0.send(self.omicron_physical_disks_list().await);
             }
             StorageRequest::NewFilesystem(request) => {
                 let result = self.add_dataset(&request).await;
@@ -587,6 +616,30 @@ impl StorageManager {
         Ok(self.resources.synchronize_disk_management().await)
     }
 
+    async fn omicron_physical_disks_list(
+        &mut self,
+    ) -> Result<OmicronPhysicalDisksConfig, Error> {
+        let log = self.log.new(o!("request" => "omicron_physical_disks_list"));
+
+        let ledger_paths = self.all_omicron_disk_ledgers().await;
+        let maybe_ledger = Ledger::<OmicronPhysicalDisksConfig>::new(
+            &log,
+            ledger_paths.clone(),
+        )
+        .await;
+
+        match maybe_ledger {
+            Some(ledger) => {
+                info!(log, "Found ledger on internal storage");
+                return Ok(ledger.data().clone());
+            }
+            None => {
+                info!(log, "No ledger detected on internal storage");
+                return Err(Error::LedgerNotFound);
+            }
+        }
+    }
+
     // Delete a real disk and return `true` if the disk was actually removed
     fn detected_raw_disk_removal(&mut self, raw_disk: RawDisk) {
         self.resources.remove_disk(raw_disk.identity());
@@ -646,7 +699,7 @@ impl StorageManager {
             .any(|(_, disk)| disk.zpool_name() == request.dataset_name.pool())
         {
             return Err(Error::ZpoolNotFound(format!(
-                "{}, looked up while trying to add dataset",
+                "{}",
                 request.dataset_name.pool(),
             )));
         }

@@ -50,9 +50,6 @@ pub enum Error {
     #[error(transparent)]
     ZoneInstall(#[from] illumos_utils::running_zone::InstallZoneError),
 
-    #[error("No U.2 Zpools found")]
-    NoU2Zpool,
-
     #[error("Failed to parse UUID from {path}: {err}")]
     ParseUuid {
         path: Utf8PathBuf,
@@ -80,9 +77,6 @@ pub enum Error {
     #[error("Not ready to manage U.2s (key manager is not ready)")]
     KeyManagerNotReady,
 
-    #[error("Physical Disk was not found")]
-    PhysicalDiskNotFound,
-
     #[error("Physical disk configuration out-of-date (asked for {requested}, but latest is {current})")]
     PhysicalDiskConfigurationOutdated {
         requested: Generation,
@@ -92,6 +86,38 @@ pub enum Error {
     #[error("Failed to update ledger in internal storage")]
     Ledger(#[from] omicron_common::ledger::Error),
 
+    #[error("No ledger found on internal storage")]
+    LedgerNotFound,
+
     #[error("Zpool Not Found: {0}")]
     ZpoolNotFound(String),
+}
+
+impl From<Error> for omicron_common::api::external::Error {
+    fn from(err: Error) -> Self {
+        use omicron_common::api::external::Error as ExternalError;
+        use omicron_common::api::external::LookupType;
+        use omicron_common::api::external::ResourceType;
+
+        match err {
+            Error::LedgerNotFound => ExternalError::ObjectNotFound {
+                type_name: ResourceType::SledLedger,
+                lookup_type: LookupType::ByOther(
+                    "Could not find record on M.2s".to_string(),
+                ),
+            },
+            Error::ZpoolNotFound(name) => ExternalError::ObjectNotFound {
+                type_name: ResourceType::Zpool,
+                lookup_type: LookupType::ByName(name.try_into().unwrap()),
+            },
+            Error::KeyManagerNotReady => ExternalError::ServiceUnavailable {
+                internal_message:
+                    "Not ready to manage disks, try again after trust quorum"
+                        .to_string(),
+            },
+            _ => omicron_common::api::external::Error::InternalError {
+                internal_message: err.to_string(),
+            },
+        }
+    }
 }
