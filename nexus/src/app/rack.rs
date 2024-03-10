@@ -103,6 +103,34 @@ impl super::Nexus {
     ) -> Result<(), Error> {
         opctx.authorize(authz::Action::Modify, &authz::FLEET).await?;
 
+        let physical_disks: Vec<_> = request
+            .physical_disks
+            .into_iter()
+            .map(|disk| {
+                db::model::PhysicalDisk::new(
+                    disk.id,
+                    disk.vendor,
+                    disk.serial,
+                    disk.model,
+                    disk.variant.into(),
+                    disk.sled_id,
+                )
+            })
+            .collect();
+
+        let zpools: Vec<_> = request
+            .zpools
+            .into_iter()
+            .map(|pool| {
+                db::model::Zpool::new(
+                    pool.id,
+                    pool.sled_id,
+                    pool.physical_disk_id,
+                    pool.size.into(),
+                )
+            })
+            .collect();
+
         let datasets: Vec<_> = request
             .datasets
             .into_iter()
@@ -222,6 +250,8 @@ impl super::Nexus {
                     rack_subnet: rack_network_config.rack_subnet.into(),
                     rack_id,
                     services: request.services,
+                    physical_disks,
+                    zpools,
                     datasets,
                     service_ip_pool_ranges,
                     internal_dns,

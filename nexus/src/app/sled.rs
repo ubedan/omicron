@@ -5,8 +5,7 @@
 //! Sleds, and the hardware and services within them.
 
 use crate::internal_api::params::{
-    PhysicalDiskDeleteRequest, PhysicalDiskPutRequest, SledAgentStartupInfo,
-    SledRole, ZpoolPutRequest,
+    PhysicalDiskPutRequest, SledAgentStartupInfo, SledRole, ZpoolPutRequest,
 };
 use nexus_db_queries::authz;
 use nexus_db_queries::context::OpContext;
@@ -203,12 +202,14 @@ impl super::Nexus {
     ) -> Result<(), Error> {
         info!(
             self.log, "upserting physical disk";
-            "sled_id" => request.sled_id.to_string(),
-            "vendor" => request.vendor.to_string(),
-            "serial" => request.serial.to_string(),
-            "model" => request.model.to_string()
+            "physical_disk_id" => %request.id,
+            "sled_id" => %request.sled_id,
+            "vendor" => %request.vendor,
+            "serial" => %request.serial,
+            "model" => %request.model,
         );
         let disk = db::model::PhysicalDisk::new(
+            request.id,
             request.vendor,
             request.serial,
             request.model,
@@ -219,61 +220,28 @@ impl super::Nexus {
         Ok(())
     }
 
-    /// Removes a physical disk from the database.
-    ///
-    /// TODO: Remove Zpools and datasets contained within this disk.
-    pub(crate) async fn delete_physical_disk(
-        &self,
-        opctx: &OpContext,
-        request: PhysicalDiskDeleteRequest,
-    ) -> Result<(), Error> {
-        info!(
-            self.log, "deleting physical disk";
-            "sled_id" => request.sled_id.to_string(),
-            "vendor" => request.vendor.to_string(),
-            "serial" => request.serial.to_string(),
-            "model" => request.model.to_string()
-        );
-        self.db_datastore
-            .physical_disk_delete(
-                &opctx,
-                request.vendor,
-                request.serial,
-                request.model,
-                request.sled_id,
-            )
-            .await?;
-        Ok(())
-    }
-
     // Zpools (contained within sleds)
 
     /// Upserts a Zpool into the database, updating it if it already exists.
     pub(crate) async fn upsert_zpool(
         &self,
         opctx: &OpContext,
-        id: Uuid,
-        sled_id: Uuid,
-        info: ZpoolPutRequest,
+        request: ZpoolPutRequest,
     ) -> Result<(), Error> {
-        info!(self.log, "upserting zpool"; "sled_id" => sled_id.to_string(), "zpool_id" => id.to_string());
-
-        let (_authz_disk, db_disk) =
-            LookupPath::new(&opctx, &self.db_datastore)
-                .physical_disk(
-                    &info.disk_vendor,
-                    &info.disk_serial,
-                    &info.disk_model,
-                )
-                .fetch()
-                .await?;
-        let zpool = db::model::Zpool::new(
-            id,
-            sled_id,
-            db_disk.uuid(),
-            info.size.into(),
+        info!(
+            self.log, "upserting zpool";
+            "sled_id" => %request.sled_id,
+            "zpool_id" => %request.id,
+            "physical_disk_id" => %request.physical_disk_id,
         );
-        self.db_datastore.zpool_upsert(zpool).await?;
+
+        let zpool = db::model::Zpool::new(
+            request.id,
+            request.sled_id,
+            request.physical_disk_id,
+            request.size.into(),
+        );
+        self.db_datastore.zpool_upsert(&opctx, zpool).await?;
         Ok(())
     }
 

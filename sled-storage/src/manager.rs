@@ -515,6 +515,10 @@ impl StorageManager {
             self.resources.set_config(&ledger.data().disks).await;
             self.state = StorageManagerState::SynchronizationNeeded;
         } else {
+            // XXX XXX XXX we need to consider the case of "no ledger, but pools
+            // exist". This is a special "ImplicitSynchronizationNeeded" case
+            // for the upgrade.
+
             self.state = StorageManagerState::Synchronized;
         }
 

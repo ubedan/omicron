@@ -158,6 +158,11 @@ pub async fn test_setup<N: NexusServer>(
 
 struct RackInitRequestBuilder {
     services: Vec<nexus_types::internal_api::params::ServicePutRequest>,
+    #[allow(dead_code)]
+    physical_disks:
+        Vec<nexus_types::internal_api::params::PhysicalDiskPutRequest>,
+    #[allow(dead_code)]
+    zpools: Vec<nexus_types::internal_api::params::ZpoolPutRequest>,
     datasets: Vec<nexus_types::internal_api::params::DatasetCreateRequest>,
     internal_dns_config: internal_dns::DnsConfigBuilder,
     mac_addrs: Box<dyn Iterator<Item = MacAddr> + Send>,
@@ -167,6 +172,8 @@ impl RackInitRequestBuilder {
     fn new() -> Self {
         Self {
             services: vec![],
+            physical_disks: vec![],
+            zpools: vec![],
             datasets: vec![],
             internal_dns_config: internal_dns::DnsConfigBuilder::new(),
             mac_addrs: Box::new(MacAddr::iter_system()),
@@ -701,6 +708,8 @@ impl<'a, N: NexusServer> ControlPlaneTestContextBuilder<'a, N> {
             //   (b) These sled-agent-created zpools are registered with Nexus
             //   asynchronously, and we're not making any effort (currently) to
             //   wait for them to be known to Nexus.
+            vec![],
+            vec![],
             vec![],
             dns_config,
             &external_dns_zone_name,

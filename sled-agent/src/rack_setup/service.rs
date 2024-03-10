@@ -656,6 +656,9 @@ impl ServiceInner {
 
         let request = NexusTypes::RackInitializationRequest {
             services,
+            // XXX XXX XXX populate these
+            physical_disks: vec![],
+            zpools: vec![],
             datasets,
             internal_services_ip_pool_ranges,
             certs: config.external_certificates.clone(),
